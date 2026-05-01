@@ -161,3 +161,103 @@ human-friendly CSV.
 **Layer / file.** Layer 2 —
 `backend/voice-agent/app/config/settings.py` (`disabled_tools`
 field).
+
+## Entry 6: `audioop` deprecation filter in pytest config
+
+**What.** `pyproject.toml` carries a `filterwarnings` entry
+suppressing `'audioop' is deprecated` `DeprecationWarning`. The
+filter exists because Pipecat 1.1.0 still imports the stdlib
+`audioop` module, which is deprecated in Python 3.12 and **removed
+in Python 3.13**. With `filterwarnings = ["error"]` the warning was
+breaking pytest collection at Pipecat-import time.
+
+**Why we shipped it.** Pipecat upstream issue #709 tracks the
+migration off `audioop`. As of Pipecat 1.1.0 (released
+2026-04-27) the migration hasn't shipped. Adding a narrow filter
+unblocks our tests on Python 3.12 without modifying upstream code
+or pinning a dev fork.
+
+**Cost.** The filter masks the symptom but doesn't fix the
+disease. Hard upgrade ceiling at Python 3.12 — moving to 3.13 will
+fail with `ImportError`, not a warning. We're locked to 3.12
+until Pipecat ships an `audioop` migration or we add `audioop-lts`
+as an explicit dependency to provide the module ourselves.
+
+**Exit condition.** Close when either:
+
+1. Pipecat ships a version that doesn't import `audioop` (track
+   upstream issue #709); or
+2. We decide to upgrade Python past 3.12, in which case add
+   `audioop-lts` to `pyproject.toml` dependencies.
+
+Drop the filter from `pyproject.toml` when either path lands.
+
+**Layer / file.** Layer 3 — `pyproject.toml` `[tool.pytest.ini_options].filterwarnings` list.
+
+## Entry 7: API keys read directly from `os.environ` in Layer 3
+
+**What.** `app/services/factory.py`'s `build_stt` and `build_tts`
+read `ASSEMBLYAI_API_KEY` and `ELEVENLABS_API_KEY` directly via
+`os.environ.get()`. This bypasses the Layer 2 `Settings` boundary
+that's supposed to be the sole source of truth for environment
+configuration.
+
+**Why we shipped it.** API keys arrive in env via `secrets_loader`
+at boot — that's Layer 6, not yet built. Pipecat's services expect
+the keys via constructor arguments (`api_key=...`). Plumbing the
+keys through `Settings` would require either a separate `Secrets`
+object or extending `Settings` to model API keys; both are
+premature before Layer 6 establishes the secrets boundary.
+
+**Cost.** Two `os.environ.get` reads in Layer 3 (one per service)
+violate the "Layer 2 owns env" principle established at Layer 2.
+If env reads spread further during Layers 4–8, the boundary erodes
+and Layer 9's settings-everywhere refactor gets larger.
+
+**Exit condition.** Layer 6 (`secrets_loader`) ships and we decide
+the secrets boundary. Three options on the table at that point:
+
+1. API keys live as fields on `Settings` (loaded from env, which
+   `secrets_loader` populated at boot).
+2. API keys live on a separate `Secrets` object that `secrets_loader`
+   constructs and the runtime layer passes to factories.
+3. The current pattern is sanctioned: `secrets_loader` writes to
+   env at boot; services read env. (Less clean, but matches v1's
+   operational model and Pipecat's own assumption that API keys
+   come from env.)
+
+If (1) or (2) is chosen, drop the `os.environ.get` reads from
+`build_stt` / `build_tts`.
+
+**Layer / file.** Layer 3 — `app/services/factory.py`
+(`build_stt`, `build_tts`).
+
+## Entry 8: TTS model has two disagreeing defaults
+
+**What.** `AgentConfig.tts.model` defaults to `"eleven_turbo_v2_5"`
+in Layer 1's Pydantic model. The factory's `_ELEVENLABS_DEFAULT_MODEL`
+is `"eleven_flash_v2_5"`. The Layer 1 default kicks in when the
+lambda omits the `tts.model` field entirely; the factory fallback
+kicks in when the field is present but empty. Two defaults for the
+same hole.
+
+**Why we shipped it.** Defense in depth. The lambda *should* always
+populate `tts.model` from Aurora, but if it doesn't, both layers
+have a fallback. The factory's `flash_v2_5` matches v1's
+production-running value — that's the deployment-safe default.
+Layer 1's `turbo_v2_5` is what agents created in v2 will use as
+their starting model.
+
+**Cost.** Mild architectural smell. Reading the code, it's not
+immediately obvious which default applies in which scenario, so a
+future maintainer might "fix" the disagreement and break one of the
+safety nets.
+
+**Exit condition.** Layer 12 (prod cutover) when we have production
+logs confirming the lambda always sends `tts.model`. At that point
+one of the two defaults can be deleted (Layer 1's, since it would
+be unreachable) or both harmonized to the same value.
+
+**Layer / file.** Layer 1 — `app/config/agent_config.py`
+(`TTSConfig.model` default); Layer 3 — `app/services/factory.py`
+(`_ELEVENLABS_DEFAULT_MODEL`).
