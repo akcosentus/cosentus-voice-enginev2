@@ -66,4 +66,9 @@ pythonpath = ["backend/voice-agent"]
 asyncio_mode = "auto"
 filterwarnings = [
     "error",
+    # Pipecat 1.1.0 imports the stdlib ``audioop`` module which is
+    # deprecated in Python 3.12 and slated for removal in 3.13. The
+    # warning fires at Pipecat-import time. We don't use audioop
+    # ourselves; trust Pipecat to migrate before 3.13 lands.
+    "ignore:'audioop' is deprecated:DeprecationWarning",
 ]

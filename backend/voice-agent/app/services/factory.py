@@ -1,0 +1,316 @@
+"""Vendor service-object factory — STT, TTS, LLM construction.
+
+Three pure functions, one Bedrock model-ID resolver. Each ``build_*``
+returns a fully-configured Pipecat service object the pipeline
+(Layer 8) hands directly to ``Pipeline(...)``.
+
+Boundary
+--------
+
+This module *does not* know about pipelines, transports, turn-taking
+strategies, or VAD analyzers. Those are Layer 8 concerns and pull
+their own constants from Pipecat or from this module's siblings.
+What lives here:
+
+* The Mode-2 AssemblyAI incantation (``vad_force_turn_endpoint=False``,
+  ``should_interrupt=False``, ``vad_threshold=0.3``, 8 kHz PCM —
+  every parameter paid for in production debugging).
+* The Bedrock model-ID translation table — Aurora stores
+  ``"claude-haiku-4-5"`` shorthand; Bedrock requires the full
+  inference profile ID. The mapping is the only authoritative
+  source.
+* Per-agent voice-tuning passthrough that respects "field unset
+  means use vendor defaults" rather than clobbering them with
+  ``None``.
+
+Locked-in choices vs per-agent fields
+-------------------------------------
+
+Module-level constants (``_STT_*``, ``_ELEVENLABS_DEFAULT_*``) are
+locked-in technical decisions that should require code review to
+change. Per-agent fields (``agent.tts.voice_id``,
+``agent.llm.temperature``) flow from the lambda's runtime-config
+through ``AgentConfig`` and into vendor settings.
+
+Behavior changes from v1
+------------------------
+
+Two intentional fixes vs ``backend/voice-agent/app/services/factory.py``
+in v1's phase-8 branch:
+
+1. ``agent.stt.keywords`` now applies on AssemblyAI calls. v1 read
+   the field but only wired it into the Deepgram branch (which v2
+   removed entirely), so on every production AssemblyAI call the
+   keywords were silently dropped. v2 wires them into
+   ``Settings.keyterms_prompt``.
+2. Bedrock prompt caching is now active on every call. v1 logged
+   ``agent.llm.enable_prompt_caching`` but never passed it to the
+   ``AWSBedrockLLMService`` constructor — the flag was a no-op. v2
+   hardcodes it ``True`` here so every Bedrock call benefits.
+"""
+
+from __future__ import annotations
+
+import os
+
+import structlog
+from pipecat.services.assemblyai.stt import AssemblyAISTTService
+from pipecat.services.aws.llm import AWSBedrockLLMService
+from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
+from pipecat.transcriptions.language import Language
+
+from app.config.agent_config import AgentConfig
+from app.config.settings import Settings
+
+logger = structlog.get_logger(__name__)
+
+
+# ── Locked-in AssemblyAI Mode-2 choices ────────────────────────────────────
+#
+# Each constant maps to one of v2's nine non-negotiable technical
+# decisions (see docs/architecture/overview.md). Change any of these
+# and you regress a production failure. v1 incident postmortems for
+# the calls behind these values: ``2a7b2f94`` (claim-number chopping
+# from Mode-1 endpointing) and ``cf423cd4`` (mid-bot interruption from
+# AssemblyAI's broadcast_interruption bypass).
+
+_STT_MODEL = "u3-rt-pro"
+"""AssemblyAI Universal-3 Pro Streaming model — purpose-built for
+alphanumeric / structured speech (claim numbers, member IDs, payer
+names). Semantic turn-detection waits for terminal punctuation, so
+mid-number pauses don't fragment turns."""
+
+_STT_SAMPLE_RATE = 8000
+"""Daily PSTN delivers 8 kHz PCM-linear. Override Pipecat's 16 kHz
+default; we send the wire's actual rate, no upsampling."""
+
+_STT_ENCODING = "pcm_s16le"
+"""Daily PSTN is PCM-linear (16-bit), not μ-law. Match it exactly."""
+
+_STT_VAD_THRESHOLD = 0.3
+"""AssemblyAI's VAD activation threshold; must match the pipeline's
+Silero confidence (also 0.3 — wired in Layer 8) to eliminate the
+"dead zone" where AssemblyAI transcribes speech Silero hasn't
+classified as voice."""
+
+_STT_VAD_FORCE_TURN_ENDPOINT = False
+"""Mode 2: AssemblyAI's native turn-endpoint detection drives turn
+endings — we do NOT force endpointing from a Silero-VAD signal.
+Mode 1 (``True``) was empirically shown to chop claim-number
+recitations into one-word fragments (incident 2026-04-30, call
+2a7b2f94)."""
+
+_STT_SHOULD_INTERRUPT = False
+"""Disable AssemblyAI's vendor-specific ``broadcast_interruption()``
+bypass. With ``True`` (the Pipecat default), AAI fires interrupts
+the instant SpeechStarted lands — before any transcript, outside
+Pipecat's user_turn_strategies machinery. The bot was killed
+mid-utterance on phantom user speech (incident 2026-04-30, call
+cf423cd4). Interruption gating runs through Layer 8's
+``MinWordsUserTurnStartStrategy`` instead."""
+
+
+# ── ElevenLabs platform fallbacks ──────────────────────────────────────────
+
+_ELEVENLABS_DEFAULT_VOICE_ID = "vW1NxlzqX8WROgpQAghR"
+"""Platform-wide fallback voice when an agent doesn't set
+``tts.voice_id``. v1 had three fallback layers (per-agent → SSM →
+hardcoded); v2 dropped SSM, so the chain is per-agent → this."""
+
+_ELEVENLABS_DEFAULT_MODEL = "eleven_flash_v2_5"
+"""Platform-wide fallback model. Matches v1's production-running
+value. ``AgentConfig.tts.model`` defaults to ``eleven_turbo_v2_5``
+on the Layer-1 side; that default is only consulted when the lambda
+omits the field, which it won't for any real agent — the factory
+fallback is the actual safety net."""
+
+
+# ── Bedrock fallback ───────────────────────────────────────────────────────
+
+_BEDROCK_DEFAULT_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+"""Used when an agent's ``llm.model`` is empty. v1 also had an
+``LLM_MODEL_ID`` env var fallback; v2 dropped it because Layer 2
+owns env reads — direct ``os.environ`` access in Layer 3 violates
+the boundary."""
+
+
+# ── Bedrock model-ID resolution table ──────────────────────────────────────
+#
+# Aurora stores short model names ("claude-haiku-4-5"); Bedrock
+# requires full inference profile IDs ("us.anthropic.claude-haiku-
+# 4-5-20251001-v1:0"). This table is the only translation source.
+#
+# IMPORTANT: these are REAL Bedrock inference-profile IDs, not
+# guesses. Verify any additions with:
+#
+#     aws bedrock list-inference-profiles --region us-east-1 \
+#       --query 'inferenceProfileSummaries[?contains(inferenceProfileId,
+#                 `claude`)].inferenceProfileId'
+#
+# Bedrock's ``ValidationException`` for a bad ID is swallowed by
+# Pipecat's ``AWSBedrockLLMService``, producing a silent no-op
+# pipeline (no LLM output, no errors in logs) — a typo here means
+# every call goes to dead air. Production incident 2026-04-24 traces
+# back to exactly this failure mode.
+
+_SHORT_TO_BEDROCK: dict[str, str] = {
+    # Sonnet 4.6's inference profile has no date suffix (unlike older
+    # Claude versions). Don't "fix" this by adding one — it'll break
+    # the call.
+    "claude-sonnet-4-6": "us.anthropic.claude-sonnet-4-6",
+    "claude-sonnet-4-5": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "claude-sonnet-4": "us.anthropic.claude-sonnet-4-20250514-v1:0",
+    "claude-haiku-4-5": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "claude-opus-4-5": "us.anthropic.claude-opus-4-5-20251101-v1:0",
+    "claude-opus-4-6": "us.anthropic.claude-opus-4-6-v1",
+    "claude-opus-4-7": "us.anthropic.claude-opus-4-7",
+}
+
+
+# ── Public functions ───────────────────────────────────────────────────────
+
+
+def resolve_bedrock_model_id(short_or_full: str) -> str:
+    """Resolve an agent's ``llm.model`` value into a Bedrock inference profile ID.
+
+    Rules:
+
+    1. Empty / falsy → :data:`_BEDROCK_DEFAULT_MODEL`.
+    2. Already a full Bedrock ID (contains a dot) → pass through.
+    3. Known short form → mapped via :data:`_SHORT_TO_BEDROCK`.
+    4. Unknown short form → log warning, pass through (Bedrock will
+       reject with a clearer error than we can produce).
+
+    See the module-level comment on :data:`_SHORT_TO_BEDROCK` for
+    the production-incident background.
+    """
+    if not short_or_full:
+        return _BEDROCK_DEFAULT_MODEL
+    if "." in short_or_full:
+        return short_or_full
+    mapped = _SHORT_TO_BEDROCK.get(short_or_full)
+    if mapped:
+        return mapped
+    logger.warning(
+        "bedrock_model_id_unknown_short_form",
+        input=short_or_full,
+        hint=(
+            "Add an entry to _SHORT_TO_BEDROCK in app/services/factory.py "
+            "if this is a valid Aurora llm_model. Passing through as-is; "
+            "Bedrock may reject."
+        ),
+    )
+    return short_or_full
+
+
+def build_stt(agent: AgentConfig) -> AssemblyAISTTService:
+    """Construct the AssemblyAI STT service with Mode-2 locked-in settings.
+
+    The agent contributes only ``stt.keywords`` (wired into
+    ``keyterms_prompt`` for AssemblyAI's keyword-boost feature). The
+    rest are platform constants.
+
+    Reads ``ASSEMBLYAI_API_KEY`` from the environment — populated at
+    boot by the Layer 6 secrets-loader from Secrets Manager.
+    """
+    api_key = os.environ.get("ASSEMBLYAI_API_KEY")
+    if not api_key:
+        raise ValueError("ASSEMBLYAI_API_KEY not set in environment")
+
+    settings_kwargs: dict[str, object] = {
+        "model": _STT_MODEL,
+        "language": Language.EN,
+        "vad_threshold": _STT_VAD_THRESHOLD,
+    }
+
+    # Wire per-agent keywords. v1 read the field but only passed it
+    # to the Deepgram branch (now removed); on AssemblyAI calls the
+    # keywords were silently dropped. v2 closes that gap. Pipecat's
+    # _NotGiven sentinel means "field unset"; we set the field only
+    # when the agent actually configured keywords so empty-list
+    # agents stay at the vendor default.
+    if agent.stt.keywords:
+        settings_kwargs["keyterms_prompt"] = list(agent.stt.keywords)
+
+    return AssemblyAISTTService(
+        api_key=api_key,
+        sample_rate=_STT_SAMPLE_RATE,
+        encoding=_STT_ENCODING,
+        vad_force_turn_endpoint=_STT_VAD_FORCE_TURN_ENDPOINT,
+        should_interrupt=_STT_SHOULD_INTERRUPT,
+        settings=AssemblyAISTTService.Settings(**settings_kwargs),
+    )
+
+
+def build_tts(agent: AgentConfig) -> ElevenLabsTTSService:
+    """Construct the ElevenLabs WebSocket TTS service.
+
+    Per-agent: ``tts.voice_id``, ``tts.model``,
+    ``tts.settings.stability``, ``tts.settings.use_speaker_boost``.
+    Each falls through to the platform default (or the vendor's own
+    default) when unset.
+
+    Reads ``ELEVENLABS_API_KEY`` from the environment.
+    """
+    api_key = os.environ.get("ELEVENLABS_API_KEY")
+    if not api_key:
+        raise ValueError("ELEVENLABS_API_KEY not set in environment")
+
+    voice = agent.tts.voice_id or _ELEVENLABS_DEFAULT_VOICE_ID
+    model = agent.tts.model or _ELEVENLABS_DEFAULT_MODEL
+
+    settings_kwargs: dict[str, object] = {
+        "voice": voice,
+        "model": model,
+    }
+
+    # Per-agent voice tuning. Only pass fields the agent set —
+    # Pipecat's _NotGiven sentinel preserves vendor defaults when
+    # the field is omitted, but None would clobber them.
+    for field in ("stability", "use_speaker_boost"):
+        value = getattr(agent.tts.settings, field, None)
+        if value is not None:
+            settings_kwargs[field] = value
+
+    return ElevenLabsTTSService(
+        api_key=api_key,
+        settings=ElevenLabsTTSService.Settings(**settings_kwargs),
+    )
+
+
+def build_llm(agent: AgentConfig, settings: Settings) -> AWSBedrockLLMService:
+    """Construct the AWS Bedrock Claude LLM service.
+
+    Per-agent: ``llm.model`` (resolved to a full Bedrock inference
+    profile ID), ``llm.max_tokens``, ``llm.temperature``.
+
+    Hardcoded: ``enable_prompt_caching=True``. v1 had a per-agent
+    flag that was logged but never wired into the constructor — the
+    field was a no-op. v2 turns prompt caching on for every call so
+    long-form system prompts (Cosentus's are several KB) only pay
+    full input cost on the first request and cached cost
+    thereafter.
+
+    Region comes from Layer 2 ``Settings.aws_region``. Credentials
+    use boto3's default chain (Fargate task IAM role) — no explicit
+    keys passed.
+    """
+    model_id = resolve_bedrock_model_id(agent.llm.model)
+
+    llm_settings_kwargs: dict[str, object] = {
+        # Hardcoded ON. v1 had a per-agent flag that was always
+        # logged but never wired — so caching was effectively off
+        # platform-wide. Closing that gap here.
+        "enable_prompt_caching": True,
+    }
+
+    if agent.llm.max_tokens is not None:
+        llm_settings_kwargs["max_tokens"] = agent.llm.max_tokens
+    if agent.llm.temperature is not None:
+        llm_settings_kwargs["temperature"] = agent.llm.temperature
+
+    return AWSBedrockLLMService(
+        model=model_id,
+        aws_region=settings.aws_region,
+        settings=AWSBedrockLLMService.Settings(**llm_settings_kwargs),
+    )
