@@ -29,29 +29,51 @@ fields are not modeled because they are not honored. Changing the
 lambda's response contract to drop the fields is a separate repo's
 work and out of scope for v2's greenfield rebuild.
 
-**Related: `_meta.version` aliasing.** The lambda sends
-`_meta.version` (Aurora's `updated_at` as unix millis, named
-"version" for historical reasons). v2's `AgentConfigMeta` exposes
-this as `updated_at_ms` for clarity, with a Pydantic field alias on
-the wire name `version`. The alias is the only reason this value
-round-trips; without it, `extra='ignore'` would drop it silently.
+**Cost.** Minor. The lambda continues to ship bytes we throw away;
+a future contract change in either direction (lambda removes the
+fields, or v2 wires them through) will be a coordinated edit.
 
 **Exit condition.** Close this entry when the cosentus-voice-api
-Lambda repo:
+Lambda repo stops sending the dropped fields (or marks them
+deprecated and the next contract revision removes them). At that
+point we drop `extra='ignore'` from the AgentConfig submodels so
+contract drift produces loud failures instead of silent ones.
 
-1. Stops sending the dropped fields (or marks them deprecated and
-   the next contract revision removes them); and
-2. Renames `_meta.version` to `_meta.updated_at_ms`.
+**Layer / file.** Layer 1 — `backend/voice-agent/app/config/agent_config.py`.
 
-At that point we drop `extra='ignore'` from the AgentConfig
-submodels (so contract drift produces loud failures) and remove the
-`Field(alias="version")` from `AgentConfigMeta.updated_at_ms`.
+## Entry 2: `AgentConfigMeta.version` → `updated_at_ms` alias
 
-## Entry 2: Layer 1 reads env vars directly; Layer 2 will own settings
+**Context.** The lambda's `_meta.version` field is Aurora's
+`updated_at` column rendered as unix milliseconds — not a real
+version number. v2's `AgentConfigMeta` exposes the value as
+`updated_at_ms` for clarity, with a Pydantic field alias on the
+wire name `version` (`Field(default=0, alias="version")`). The
+alias is the only reason the data round-trips; without it,
+`extra='ignore'` would drop the value silently and every call
+would log `updated_at_ms=0`.
 
-**Context.** `app/config/agent_config.py` reads `AWS_REGION` and
-`VOICE_API_LAMBDA_NAME` directly from `os.environ` inside the
-loader. v2 plans a dedicated settings layer (Layer 2) that owns all
+**Why we accepted this.** Aligning the lambda contract is part of
+the lambda repo's P5 cleanup work (see v1's contract-trace audit).
+Decoupled from v2's greenfield rebuild — v2 papers over the
+upstream misnaming so internal callers see the honest name today.
+
+**Cost.** Minor. A workaround that papers over upstream misnaming.
+Anyone reading `AgentConfigMeta` for the first time has to follow
+the alias to understand the wire format.
+
+**Exit condition.** Close when the lambda repo's P5 cleanup
+renames the field on the wire. At that point we drop the
+`Field(alias="version")` so `updated_at_ms` is just the wire
+field name.
+
+**Layer / file.** Layer 1 — `backend/voice-agent/app/config/agent_config.py`
+(`AgentConfigMeta`).
+
+## Entry 3: Layer 1 reads env vars directly; Layer 2 will own settings
+
+**Context.** `app/config/agent_config.py` reads
+`VOICE_API_LAMBDA_NAME` and `AWS_REGION` directly from `os.environ`.
+v2 plans a dedicated settings layer (Layer 2) that owns all
 env-and-SSM bootstrap; the loader should consume from it rather
 than reach into `os.environ` itself.
 
@@ -59,7 +81,13 @@ than reach into `os.environ` itself.
 `os.environ.get(...)` calls is a two-line workaround; abstracting
 prematurely would violate the "no premature abstraction" principle.
 
+**Cost.** Minimal. Two `os.environ.get` calls become a `Settings`
+field read when Layer 2 lands.
+
 **Exit condition.** When Layer 2 (`app/config/settings.py`) lands,
 refactor `load_agent_config` to take a `Settings` instance (or
 read from a module-level resolved settings object) instead of
-calling `os.environ.get` itself.
+calling `os.environ.get` itself. The module-level
+`_LAMBDA_CLIENT`'s region also moves to settings.
+
+**Layer / file.** Layer 1 — `backend/voice-agent/app/config/agent_config.py`.

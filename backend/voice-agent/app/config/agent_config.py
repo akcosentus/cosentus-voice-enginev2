@@ -40,6 +40,7 @@ from typing import Any
 
 import boto3
 import structlog
+from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -169,7 +170,7 @@ class AgentConfigMeta(BaseModel):
     aliases ``version`` -> ``updated_at_ms`` so the data round-trips
     while internal callers see the honest name. When the lambda
     renames the field, the alias goes too. See
-    docs/v2-tech-debt-log.md entry 1.
+    docs/v2-tech-debt-log.md entry 2.
     """
 
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
@@ -214,11 +215,43 @@ class AgentConfig(BaseModel):
 # Layer 1 reads env vars directly; Layer 2 (settings) doesn't exist
 # yet. When it lands, the loader takes a settings object instead of
 # calling os.environ.get itself. See docs/v2-tech-debt-log.md
-# entry 2.
+# entry 3.
 
 _LAMBDA_NAME_ENV = "VOICE_API_LAMBDA_NAME"
 _REGION_ENV = "AWS_REGION"
 _DEFAULT_REGION = "us-east-1"
+
+# Module-level Lambda client.
+#
+# AWS boto3 docs explicitly warn against creating clients inside
+# concurrent contexts: doing so can cause SSL interpreter failures
+# and response-ordering issues. Sync boto3 clients are thread-safe,
+# so the documented pattern is one client shared across worker
+# threads.
+#
+# We create the client through ``boto3.session.Session().client(...)``
+# rather than ``boto3.client(...)`` to bypass the global
+# DEFAULT_SESSION entirely — that's the multithreaded pattern AWS
+# documents.
+#
+# Reference:
+# https://boto3.amazonaws.com/v1/documentation/api/latest/guide/clients.html
+#
+# Explicit timeouts: default boto3 ``read_timeout`` is 60 s, which
+# would hang a call for up to a minute on a slow lambda or hot
+# Aurora and burn the bot-runner's retry budget. 8 s read /
+# 2 s connect / 2 attempts adaptive matches the latency budget at
+# call start (warm ~200 ms, cold ~1.2 s, so 8 s leaves plenty of
+# headroom for genuine work but fails fast on a stuck call).
+_LAMBDA_CLIENT = boto3.session.Session().client(
+    "lambda",
+    region_name=os.environ.get(_REGION_ENV, _DEFAULT_REGION),
+    config=Config(
+        connect_timeout=2.0,
+        read_timeout=8.0,
+        retries={"max_attempts": 2, "mode": "adaptive"},
+    ),
+)
 
 
 def _build_proxy_event(agent_id_or_name: str) -> bytes:
@@ -233,20 +266,14 @@ def _build_proxy_event(agent_id_or_name: str) -> bytes:
     return json.dumps(payload).encode("utf-8")
 
 
-def _invoke_lambda_sync(
-    function_name: str,
-    payload: bytes,
-    region: str,
-) -> dict[str, Any]:
+def _invoke_lambda_sync(function_name: str, payload: bytes) -> dict[str, Any]:
     """Synchronous boto3 ``Lambda.Invoke`` — runs in a worker thread.
 
-    Sync boto3 is deliberate over aiobotocore (see module docstring).
-    A fresh client per call is intentional: clients are cheap, and
-    pinning a long-lived async client across event loops has been a
-    source of stale-connection errors on Fargate.
+    Uses the module-level :data:`_LAMBDA_CLIENT`. See its definition
+    above for the AWS-documented rationale (one client, shared,
+    timeouts pinned).
     """
-    client = boto3.client("lambda", region_name=region)
-    return client.invoke(
+    return _LAMBDA_CLIENT.invoke(
         FunctionName=function_name,
         InvocationType="RequestResponse",
         Payload=payload,
@@ -282,11 +309,10 @@ async def load_agent_config(agent_id_or_name: str) -> AgentConfig:
         )
         raise AgentConfigLoadError(f"{_LAMBDA_NAME_ENV} environment variable is required")
 
-    region = os.environ.get(_REGION_ENV, _DEFAULT_REGION)
     payload = _build_proxy_event(agent_id_or_name)
 
     try:
-        resp = await asyncio.to_thread(_invoke_lambda_sync, function_name, payload, region)
+        resp = await asyncio.to_thread(_invoke_lambda_sync, function_name, payload)
     except (BotoCoreError, ClientError) as exc:
         load_time_ms = (time.perf_counter() - started) * 1000
         logger.error(

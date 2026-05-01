@@ -12,7 +12,7 @@ from app.config.agent_config import (
     AgentConfigLoadError,
     load_agent_config,
 )
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ReadTimeoutError
 from pydantic import ValidationError
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
@@ -269,10 +269,11 @@ class TestLoadAgentConfig:
         assert cfg.meta.agent_id == "00000000-0000-4000-8000-000000000001"
         assert cfg.meta.updated_at_ms == 1730486400000
 
-        # Lambda invoked with the right shape
-        function_name, payload_bytes, region = mock_invoke.call_args.args
+        # Lambda invoked with the right shape. Region is captured at
+        # module import on the shared client (see _LAMBDA_CLIENT) so
+        # it isn't passed to _invoke_lambda_sync.
+        function_name, payload_bytes = mock_invoke.call_args.args
         assert function_name == voice_api_lambda_env
-        assert region == "us-east-1"
         event = json.loads(payload_bytes)
         assert event["httpMethod"] == "GET"
         assert event["path"] == "/api/agents/chris-claim-status/runtime-config"
@@ -382,3 +383,23 @@ class TestLoadAgentConfig:
         with pytest.raises(AgentConfigLoadError) as exc_info:
             await load_agent_config("chris-claim-status")
         assert exc_info.value.__cause__ is original
+
+    async def test_lambda_invoke_timeout_raises(
+        self,
+        mocker,
+        voice_api_lambda_env: str,
+    ):
+        # Lambda read-timeout (8 s on the module-level client) surfaces
+        # as a ReadTimeoutError. It's a BotoCoreError subclass, so the
+        # loader's catch-all wraps it in AgentConfigLoadError just like
+        # a ClientError. Verifies the wrapping plus __cause__ chain so
+        # operators can read the original timeout in tracebacks.
+        timeout = ReadTimeoutError(
+            endpoint_url="https://lambda.us-east-1.amazonaws.com/2015-03-31/functions/test"
+        )
+        mock_invoke = mocker.patch("app.config.agent_config._invoke_lambda_sync")
+        mock_invoke.side_effect = timeout
+
+        with pytest.raises(AgentConfigLoadError, match="Lambda invoke failed") as exc_info:
+            await load_agent_config("chris-claim-status")
+        assert exc_info.value.__cause__ is timeout
