@@ -134,7 +134,20 @@ shape/cleanliness concern than an operational one.
 `backend/voice-agent/app/config/agent_config.py` module-level
 `_LAMBDA_CLIENT`.
 
-## Entry 5: `disabled_tools` stored as raw CSV string
+## Entry 5: ~~`disabled_tools` stored as raw CSV string~~
+
+**Closed:** 2026-05-04 in Layer 4 (commit `36ba285`).
+`parse_disabled_tools()` in `app/tools/registry.py` implements the
+parse-on-construct pattern at the consumer boundary, exactly as the
+entry's exit condition specified — whitespace stripping, empty-entry
+filtering, and CSV-to-`list[str]` conversion all live at the
+consumption site. `Settings.disabled_tools` stays a `str` on the wire
+(operator-friendly), and Layer 4 owns the parse.
+
+---
+
+<details>
+<summary>Original entry (kept for history)</summary>
 
 **What.** `Settings.disabled_tools` is typed as `str`, not
 `list[str]`. Pydantic Settings supports JSON-encoded list strings
@@ -161,6 +174,8 @@ human-friendly CSV.
 **Layer / file.** Layer 2 —
 `backend/voice-agent/app/config/settings.py` (`disabled_tools`
 field).
+
+</details>
 
 ## Entry 6: `audioop` deprecation filter in pytest config
 
