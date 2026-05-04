@@ -103,7 +103,23 @@ separately in entry 4.
 
 **Layer / file.** Layer 1 — `backend/voice-agent/app/config/agent_config.py`.
 
-## Entry 4: `_LAMBDA_CLIENT` region captured at import time
+## Entry 4: ~~`_LAMBDA_CLIENT` region captured at import time~~
+
+**Closed:** 2026-05-04 in a Layer 6 follow-up commit alongside
+Entry 11. ``app/config/agent_config.py`` now uses a
+``_get_lambda_client(settings)`` lazy-init helper: the boto3 lambda
+client is constructed on first call using ``settings.aws_region``
+(or the env-var fallback when no Settings is supplied — tech debt
+Entry 3 still tracks that), then cached at module level for every
+subsequent call. ``_invoke_lambda_sync`` takes ``settings`` as a
+third positional arg; ``call_writer.py`` passes its caller's
+settings through. The function signature's promise — "settings
+drives the client" — is now actually true.
+
+---
+
+<details>
+<summary>Original entry (kept for history)</summary>
 
 **What.** `agent_config.py` constructs the boto3 lambda client at
 module import using `os.environ.get("AWS_REGION", "us-east-1")`.
@@ -133,6 +149,8 @@ shape/cleanliness concern than an operational one.
 **Layer / file.** Layer 1 —
 `backend/voice-agent/app/config/agent_config.py` module-level
 `_LAMBDA_CLIENT`.
+
+</details>
 
 ## Entry 5: ~~`disabled_tools` stored as raw CSV string~~
 

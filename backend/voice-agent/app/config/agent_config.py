@@ -242,37 +242,68 @@ _LAMBDA_NAME_ENV = "VOICE_API_LAMBDA_NAME"
 _REGION_ENV = "AWS_REGION"
 _DEFAULT_REGION = "us-east-1"
 
-# Module-level Lambda client.
+# Lazy-initialized Lambda client. ``None`` until
+# :func:`_get_lambda_client` runs the first time, at which point we
+# construct the client using ``settings.aws_region`` (or the env-var
+# fallback when no Settings is supplied) and cache it for every
+# subsequent call.
 #
-# AWS boto3 docs explicitly warn against creating clients inside
-# concurrent contexts: doing so can cause SSL interpreter failures
-# and response-ordering issues. Sync boto3 clients are thread-safe,
-# so the documented pattern is one client shared across worker
-# threads.
+# Why lazy:
 #
-# We create the client through ``boto3.session.Session().client(...)``
-# rather than ``boto3.client(...)`` to bypass the global
-# DEFAULT_SESSION entirely — that's the multithreaded pattern AWS
-# documents.
+# * AWS boto3 docs explicitly warn against creating clients inside
+#   concurrent contexts: doing so can cause SSL interpreter failures
+#   and response-ordering issues. Sync boto3 clients are thread-safe,
+#   so the documented pattern is one client shared across worker
+#   threads. We honor that — the cache makes the client effectively
+#   module-shared after the first call.
+# * We create through ``boto3.session.Session().client(...)`` rather
+#   than ``boto3.client(...)`` to bypass the global DEFAULT_SESSION
+#   entirely — that's the multithreaded pattern AWS documents.
+#   Reference: https://boto3.amazonaws.com/v1/documentation/api/latest/guide/clients.html
+# * Explicit timeouts: default ``read_timeout`` is 60 s which would
+#   hang the engine on a slow lambda or hot Aurora. 8 s read / 2 s
+#   connect / 2 attempts adaptive matches the latency budget at call
+#   start (warm ~200 ms, cold ~1.2 s).
 #
-# Reference:
-# https://boto3.amazonaws.com/v1/documentation/api/latest/guide/clients.html
-#
-# Explicit timeouts: default boto3 ``read_timeout`` is 60 s, which
-# would hang a call for up to a minute on a slow lambda or hot
-# Aurora and burn the bot-runner's retry budget. 8 s read /
-# 2 s connect / 2 attempts adaptive matches the latency budget at
-# call start (warm ~200 ms, cold ~1.2 s, so 8 s leaves plenty of
-# headroom for genuine work but fails fast on a stuck call).
-_LAMBDA_CLIENT = boto3.session.Session().client(
-    "lambda",
-    region_name=os.environ.get(_REGION_ENV, _DEFAULT_REGION),
-    config=Config(
-        connect_timeout=2.0,
-        read_timeout=8.0,
-        retries={"max_attempts": 2, "mode": "adaptive"},
-    ),
-)
+# Closes Entry 4 of the tech debt log: the region is now bound from
+# ``settings.aws_region`` at first use rather than from
+# ``os.environ`` at import time. The function signature's promise —
+# "settings drives the client" — is now actually true.
+_LAMBDA_CLIENT: Any = None
+
+
+def _get_lambda_client(settings: Settings | None = None) -> Any:
+    """Return the module-shared lambda client, constructing it lazily.
+
+    Idempotent — every call after the first returns the cached
+    client. Region binding is taken from ``settings.aws_region`` when
+    provided. When ``settings is None`` (Layer 1's pre-Layer-9 callers
+    that haven't been wired through Settings yet — see tech debt
+    Entry 3), we fall back to ``os.environ`` like the original
+    pattern.
+
+    The first call pays the construction cost (~1 ms on a warm
+    interpreter). The boto3 sync client is thread-safe so the same
+    instance is shared across the worker threads
+    :func:`asyncio.to_thread` dispatches to.
+    """
+    global _LAMBDA_CLIENT
+    if _LAMBDA_CLIENT is None:
+        region = (
+            settings.aws_region
+            if settings is not None
+            else os.environ.get(_REGION_ENV, _DEFAULT_REGION)
+        )
+        _LAMBDA_CLIENT = boto3.session.Session().client(
+            "lambda",
+            region_name=region,
+            config=Config(
+                connect_timeout=2.0,
+                read_timeout=8.0,
+                retries={"max_attempts": 2, "mode": "adaptive"},
+            ),
+        )
+    return _LAMBDA_CLIENT
 
 
 def _build_proxy_event(agent_id_or_name: str) -> bytes:
@@ -287,14 +318,19 @@ def _build_proxy_event(agent_id_or_name: str) -> bytes:
     return json.dumps(payload).encode("utf-8")
 
 
-def _invoke_lambda_sync(function_name: str, payload: bytes) -> dict[str, Any]:
+def _invoke_lambda_sync(
+    function_name: str,
+    payload: bytes,
+    settings: Settings | None = None,
+) -> dict[str, Any]:
     """Synchronous boto3 ``Lambda.Invoke`` — runs in a worker thread.
 
-    Uses the module-level :data:`_LAMBDA_CLIENT`. See its definition
-    above for the AWS-documented rationale (one client, shared,
-    timeouts pinned).
+    Resolves the module-shared client via :func:`_get_lambda_client`
+    so the first call binds region from ``settings`` (when provided)
+    rather than from the import-time env read.
     """
-    return _LAMBDA_CLIENT.invoke(
+    client = _get_lambda_client(settings)
+    return client.invoke(
         FunctionName=function_name,
         InvocationType="RequestResponse",
         Payload=payload,
@@ -347,7 +383,9 @@ async def load_agent_config(
     payload = _build_proxy_event(agent_id_or_name)
 
     try:
-        resp = await asyncio.to_thread(_invoke_lambda_sync, function_name, payload)
+        resp = await asyncio.to_thread(
+            _invoke_lambda_sync, function_name, payload, settings
+        )
     except (BotoCoreError, ClientError) as exc:
         load_time_ms = (time.perf_counter() - started) * 1000
         logger.error(

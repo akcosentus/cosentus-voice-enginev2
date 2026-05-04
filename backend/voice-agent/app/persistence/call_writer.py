@@ -41,7 +41,11 @@ import structlog
 # instance, shared across all invokes; explicit connect/read
 # timeouts; adaptive retries. See agent_config.py for the AWS-doc
 # rationale.
-from app.config.agent_config import _LAMBDA_CLIENT
+#
+# We import the lazy-init getter rather than the cached client
+# directly — that way the first call's ``settings`` parameter is
+# what actually drives region binding (closes Entry 4).
+from app.config.agent_config import _get_lambda_client
 from app.config.settings import Settings
 from app.persistence.call_record import CallRecord
 
@@ -86,8 +90,9 @@ async def write_call_record(record: CallRecord, settings: Settings) -> bool:
     }
 
     try:
+        client = _get_lambda_client(settings)
         response = await asyncio.to_thread(
-            _LAMBDA_CLIENT.invoke,
+            client.invoke,
             FunctionName=settings.voice_api_lambda_name,
             InvocationType="RequestResponse",
             Payload=json.dumps(envelope).encode("utf-8"),
@@ -167,8 +172,9 @@ async def trigger_auto_actions(call_id: str, settings: Settings) -> dict[str, An
     }
 
     try:
+        client = _get_lambda_client(settings)
         response = await asyncio.to_thread(
-            _LAMBDA_CLIENT.invoke,
+            client.invoke,
             FunctionName=settings.voice_api_lambda_name,
             InvocationType="RequestResponse",
             Payload=json.dumps(envelope).encode("utf-8"),

@@ -294,11 +294,12 @@ class TestLoadAgentConfig:
         assert cfg.meta.agent_id == "00000000-0000-4000-8000-000000000001"
         assert cfg.meta.updated_at_ms == 1730486400000
 
-        # Lambda invoked with the right shape. Region is captured at
-        # module import on the shared client (see _LAMBDA_CLIENT) so
-        # it isn't passed to _invoke_lambda_sync.
-        function_name, payload_bytes = mock_invoke.call_args.args
+        # Lambda invoked with the right shape. ``_invoke_lambda_sync``
+        # takes (function_name, payload, settings) — settings is the
+        # third arg, ``None`` here because no Settings object is passed.
+        function_name, payload_bytes, settings_arg = mock_invoke.call_args.args
         assert function_name == voice_api_lambda_env
+        assert settings_arg is None
         event = json.loads(payload_bytes)
         assert event["httpMethod"] == "GET"
         assert event["path"] == "/api/agents/chris-claim-status/runtime-config"
@@ -454,5 +455,115 @@ class TestLoadAgentConfig:
 
         await load_agent_config("chris-claim-status", settings=settings)
 
-        function_name, _payload = mock_invoke.call_args.args
+        # Third positional arg is the Settings object, which the
+        # lazy-init lambda client uses to bind region.
+        function_name, _payload, settings_arg = mock_invoke.call_args.args
         assert function_name == "from-settings"
+        assert settings_arg is settings
+
+
+class TestLambdaClientLazyInit:
+    """Closes Entry 4: ``_LAMBDA_CLIENT`` now binds region from ``settings.aws_region``."""
+
+    def test_lazy_init_uses_settings_region(self, monkeypatch):
+        """First call to ``_get_lambda_client(settings)`` must construct
+        the boto3 client with ``settings.aws_region`` — even when the
+        env var disagrees."""
+        from app.config import agent_config as agent_config_module
+
+        # Reset the cache and set a misleading env var. If the lazy-init
+        # fell back to env reads we'd see "us-east-1" below.
+        agent_config_module._LAMBDA_CLIENT = None
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        settings = Settings(
+            voice_api_lambda_name="test-lambda",
+            api_key_secret_arn="arn:aws:secretsmanager:us-east-1:0:secret:test",
+            aws_region="eu-central-1",
+        )
+
+        captured = {}
+
+        def fake_client(service: str, region_name: str, config):
+            captured["service"] = service
+            captured["region"] = region_name
+            return MagicMock()
+
+        fake_session = MagicMock()
+        fake_session.client = MagicMock(side_effect=fake_client)
+        original_session = agent_config_module.boto3.session.Session
+        try:
+            agent_config_module.boto3.session.Session = MagicMock(
+                return_value=fake_session
+            )
+            agent_config_module._get_lambda_client(settings)
+        finally:
+            agent_config_module.boto3.session.Session = original_session
+            agent_config_module._LAMBDA_CLIENT = None
+
+        assert captured["service"] == "lambda"
+        assert captured["region"] == "eu-central-1"
+
+    def test_lazy_init_falls_back_to_env_when_no_settings(self, monkeypatch):
+        """Pre-Layer-9 callers without a Settings object still get a
+        working client via the env-var fallback (tech debt Entry 3)."""
+        from app.config import agent_config as agent_config_module
+
+        agent_config_module._LAMBDA_CLIENT = None
+        monkeypatch.setenv("AWS_REGION", "ap-south-1")
+
+        captured = {}
+
+        def fake_client(service: str, region_name: str, config):
+            captured["region"] = region_name
+            return MagicMock()
+
+        fake_session = MagicMock()
+        fake_session.client = MagicMock(side_effect=fake_client)
+        original_session = agent_config_module.boto3.session.Session
+        try:
+            agent_config_module.boto3.session.Session = MagicMock(
+                return_value=fake_session
+            )
+            agent_config_module._get_lambda_client(None)
+        finally:
+            agent_config_module.boto3.session.Session = original_session
+            agent_config_module._LAMBDA_CLIENT = None
+
+        assert captured["region"] == "ap-south-1"
+
+    def test_lazy_init_caches_client_across_calls(self):
+        """After the first call, subsequent calls return the same instance."""
+        from app.config import agent_config as agent_config_module
+
+        agent_config_module._LAMBDA_CLIENT = None
+
+        construct_count = 0
+
+        def fake_client(service: str, region_name: str, config):
+            nonlocal construct_count
+            construct_count += 1
+            return MagicMock(name=f"client-{construct_count}")
+
+        fake_session = MagicMock()
+        fake_session.client = MagicMock(side_effect=fake_client)
+        original_session = agent_config_module.boto3.session.Session
+
+        settings = Settings(
+            voice_api_lambda_name="t",
+            api_key_secret_arn="arn:aws:secretsmanager:us-east-1:0:secret:t",
+            aws_region="us-east-1",
+        )
+
+        try:
+            agent_config_module.boto3.session.Session = MagicMock(
+                return_value=fake_session
+            )
+            client_a = agent_config_module._get_lambda_client(settings)
+            client_b = agent_config_module._get_lambda_client(settings)
+        finally:
+            agent_config_module.boto3.session.Session = original_session
+            agent_config_module._LAMBDA_CLIENT = None
+
+        assert client_a is client_b
+        assert construct_count == 1

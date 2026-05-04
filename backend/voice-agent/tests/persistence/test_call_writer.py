@@ -65,7 +65,8 @@ def _error_response(status_code: int = 500, body: str = '{"detail":"boom"}') -> 
 
 @pytest.mark.asyncio
 async def test_write_returns_true_on_2xx():
-    with patch("app.persistence.call_writer._LAMBDA_CLIENT") as mock_lambda:
+    with patch("app.persistence.call_writer._get_lambda_client") as _mock_get:
+        mock_lambda = _mock_get.return_value
         mock_lambda.invoke = MagicMock(return_value=_ok_response(201))
         ok = await write_call_record(_record(), _settings())
     assert ok is True
@@ -73,7 +74,8 @@ async def test_write_returns_true_on_2xx():
 
 @pytest.mark.asyncio
 async def test_write_returns_true_on_200_too():
-    with patch("app.persistence.call_writer._LAMBDA_CLIENT") as mock_lambda:
+    with patch("app.persistence.call_writer._get_lambda_client") as _mock_get:
+        mock_lambda = _mock_get.return_value
         mock_lambda.invoke = MagicMock(return_value=_ok_response(200))
         ok = await write_call_record(_record(), _settings())
     assert ok is True
@@ -81,8 +83,9 @@ async def test_write_returns_true_on_200_too():
 
 @pytest.mark.asyncio
 async def test_write_uses_layer1_lambda_client():
-    """The writer reuses Layer 1's _LAMBDA_CLIENT — assert via patch."""
-    with patch("app.persistence.call_writer._LAMBDA_CLIENT") as mock_lambda:
+    """The writer reuses Layer 1's lazy-init lambda client — assert via patch."""
+    with patch("app.persistence.call_writer._get_lambda_client") as _mock_get:
+        mock_lambda = _mock_get.return_value
         mock_lambda.invoke = MagicMock(return_value=_ok_response())
         await write_call_record(_record(), _settings())
         mock_lambda.invoke.assert_called_once()
@@ -97,7 +100,8 @@ async def test_envelope_shape_matches_lambda_contract():
         captured.update(kwargs)
         return _ok_response()
 
-    with patch("app.persistence.call_writer._LAMBDA_CLIENT") as mock_lambda:
+    with patch("app.persistence.call_writer._get_lambda_client") as _mock_get:
+        mock_lambda = _mock_get.return_value
         mock_lambda.invoke = MagicMock(side_effect=capture)
         await write_call_record(_record(), _settings())
 
@@ -120,7 +124,8 @@ async def test_envelope_shape_matches_lambda_contract():
 
 @pytest.mark.asyncio
 async def test_write_returns_false_on_non_2xx():
-    with patch("app.persistence.call_writer._LAMBDA_CLIENT") as mock_lambda:
+    with patch("app.persistence.call_writer._get_lambda_client") as _mock_get:
+        mock_lambda = _mock_get.return_value
         mock_lambda.invoke = MagicMock(return_value=_error_response(500))
         ok = await write_call_record(_record(), _settings())
     assert ok is False
@@ -128,7 +133,8 @@ async def test_write_returns_false_on_non_2xx():
 
 @pytest.mark.asyncio
 async def test_write_returns_false_on_invoke_exception():
-    with patch("app.persistence.call_writer._LAMBDA_CLIENT") as mock_lambda:
+    with patch("app.persistence.call_writer._get_lambda_client") as _mock_get:
+        mock_lambda = _mock_get.return_value
         mock_lambda.invoke = MagicMock(side_effect=RuntimeError("connection reset"))
         ok = await write_call_record(_record(), _settings())
     assert ok is False
@@ -136,7 +142,8 @@ async def test_write_returns_false_on_invoke_exception():
 
 @pytest.mark.asyncio
 async def test_write_returns_false_on_no_payload():
-    with patch("app.persistence.call_writer._LAMBDA_CLIENT") as mock_lambda:
+    with patch("app.persistence.call_writer._get_lambda_client") as _mock_get:
+        mock_lambda = _mock_get.return_value
         mock_lambda.invoke = MagicMock(return_value={})
         ok = await write_call_record(_record(), _settings())
     assert ok is False
@@ -146,7 +153,8 @@ async def test_write_returns_false_on_no_payload():
 async def test_write_returns_false_on_malformed_envelope():
     """Lambda returned bytes that aren't JSON."""
     bad_envelope = {"Payload": io.BytesIO(b"not json {{{")}
-    with patch("app.persistence.call_writer._LAMBDA_CLIENT") as mock_lambda:
+    with patch("app.persistence.call_writer._get_lambda_client") as _mock_get:
+        mock_lambda = _mock_get.return_value
         mock_lambda.invoke = MagicMock(return_value=bad_envelope)
         ok = await write_call_record(_record(), _settings())
     assert ok is False
@@ -156,7 +164,8 @@ async def test_write_returns_false_on_malformed_envelope():
 async def test_write_returns_false_when_envelope_is_a_list():
     """Some lambda misconfigurations return a non-dict JSON body."""
     bad_envelope = {"Payload": io.BytesIO(b'["not", "a", "dict"]')}
-    with patch("app.persistence.call_writer._LAMBDA_CLIENT") as mock_lambda:
+    with patch("app.persistence.call_writer._get_lambda_client") as _mock_get:
+        mock_lambda = _mock_get.return_value
         mock_lambda.invoke = MagicMock(return_value=bad_envelope)
         ok = await write_call_record(_record(), _settings())
     assert ok is False
@@ -165,7 +174,8 @@ async def test_write_returns_false_when_envelope_is_a_list():
 @pytest.mark.asyncio
 async def test_write_never_raises_on_arbitrary_exceptions():
     """Anything bizarre at the boto3 layer should still resolve to False."""
-    with patch("app.persistence.call_writer._LAMBDA_CLIENT") as mock_lambda:
+    with patch("app.persistence.call_writer._get_lambda_client") as _mock_get:
+        mock_lambda = _mock_get.return_value
         mock_lambda.invoke = MagicMock(side_effect=KeyboardInterrupt("simulated"))
         # KeyboardInterrupt is BaseException, NOT Exception — should propagate.
         with pytest.raises(KeyboardInterrupt):
@@ -179,7 +189,8 @@ async def test_write_swallows_exception_subclass():
     class CustomBoto3Error(Exception):
         pass
 
-    with patch("app.persistence.call_writer._LAMBDA_CLIENT") as mock_lambda:
+    with patch("app.persistence.call_writer._get_lambda_client") as _mock_get:
+        mock_lambda = _mock_get.return_value
         mock_lambda.invoke = MagicMock(side_effect=CustomBoto3Error("regional outage"))
         ok = await write_call_record(_record(), _settings())
     assert ok is False
@@ -191,7 +202,8 @@ async def test_write_swallows_exception_subclass():
 @pytest.mark.asyncio
 async def test_auto_actions_returns_parsed_body_on_2xx():
     body_json = {"actions_taken": 3, "cost": "0.0024", "quality_score": 80}
-    with patch("app.persistence.call_writer._LAMBDA_CLIENT") as mock_lambda:
+    with patch("app.persistence.call_writer._get_lambda_client") as _mock_get:
+        mock_lambda = _mock_get.return_value
         mock_lambda.invoke = MagicMock(return_value=_ok_response(200, body=json.dumps(body_json)))
         result = await trigger_auto_actions("call-id-1", _settings())
     assert result is not None
@@ -201,7 +213,8 @@ async def test_auto_actions_returns_parsed_body_on_2xx():
 
 @pytest.mark.asyncio
 async def test_auto_actions_returns_none_on_non_2xx():
-    with patch("app.persistence.call_writer._LAMBDA_CLIENT") as mock_lambda:
+    with patch("app.persistence.call_writer._get_lambda_client") as _mock_get:
+        mock_lambda = _mock_get.return_value
         mock_lambda.invoke = MagicMock(return_value=_error_response(404))
         result = await trigger_auto_actions("call-id-1", _settings())
     assert result is None
@@ -209,7 +222,8 @@ async def test_auto_actions_returns_none_on_non_2xx():
 
 @pytest.mark.asyncio
 async def test_auto_actions_returns_none_on_invoke_exception():
-    with patch("app.persistence.call_writer._LAMBDA_CLIENT") as mock_lambda:
+    with patch("app.persistence.call_writer._get_lambda_client") as _mock_get:
+        mock_lambda = _mock_get.return_value
         mock_lambda.invoke = MagicMock(side_effect=RuntimeError("boom"))
         result = await trigger_auto_actions("call-id-1", _settings())
     assert result is None
@@ -223,7 +237,8 @@ async def test_auto_actions_envelope_shape():
         captured.update(kwargs)
         return _ok_response(200, body="{}")
 
-    with patch("app.persistence.call_writer._LAMBDA_CLIENT") as mock_lambda:
+    with patch("app.persistence.call_writer._get_lambda_client") as _mock_get:
+        mock_lambda = _mock_get.return_value
         mock_lambda.invoke = MagicMock(side_effect=capture)
         await trigger_auto_actions("call-id-xyz", _settings())
 
@@ -237,7 +252,8 @@ async def test_auto_actions_envelope_shape():
 async def test_auto_actions_returns_none_on_unparseable_body():
     """A 2xx with non-JSON body still falls back to None."""
     bad_body = "not json {{{"
-    with patch("app.persistence.call_writer._LAMBDA_CLIENT") as mock_lambda:
+    with patch("app.persistence.call_writer._get_lambda_client") as _mock_get:
+        mock_lambda = _mock_get.return_value
         mock_lambda.invoke = MagicMock(return_value=_ok_response(200, body=bad_body))
         result = await trigger_auto_actions("call-id-1", _settings())
     assert result is None
