@@ -204,6 +204,25 @@ class AgentConfig(BaseModel):
     first_message: str = ""
     ivr_goal: str = ""
 
+    speak_first: bool = True
+    """Whether the agent speaks first when the call starts.
+
+    Three modes (matching Retell's pattern):
+
+    * ``speak_first=False`` — user speaks first, the bot stays silent
+      on connect and waits for transcribed input before generating
+      anything.
+    * ``speak_first=True`` AND ``first_message`` non-empty —
+      static opener: the bot speaks ``first_message`` verbatim
+      via TTS, no LLM round-trip.
+    * ``speak_first=True`` AND ``first_message`` empty — dynamic
+      opener: the LLM generates the first turn from
+      ``system_prompt``.
+
+    Defaults to ``True`` for backward compatibility — every existing
+    Cosentus agent in production today implicitly speaks first
+    (they all have a non-empty ``first_message``)."""
+
     llm: LLMConfig = Field(default_factory=LLMConfig)
     tts: TTSConfig = Field(default_factory=TTSConfig)
     stt: STTConfig = Field(default_factory=STTConfig)

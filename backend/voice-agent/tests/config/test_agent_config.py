@@ -211,6 +211,30 @@ class TestAgentConfigParse:
         assert "recording" not in dumped
 
 
+class TestAgentConfigSpeakFirst:
+    def test_default_is_true_when_field_missing_from_lambda(self):
+        # Lambda hasn't deployed the speak_first column yet → field
+        # is absent from the response. AgentConfig defaults to True
+        # (matches every existing production agent's implicit behavior).
+        cfg = AgentConfig.model_validate({"name": "agent", "first_message": "Hello!"})
+        assert cfg.speak_first is True
+
+    def test_explicit_true_loads(self):
+        cfg = AgentConfig.model_validate({"name": "agent", "speak_first": True})
+        assert cfg.speak_first is True
+
+    def test_explicit_false_loads(self):
+        cfg = AgentConfig.model_validate({"name": "agent", "speak_first": False})
+        assert cfg.speak_first is False
+
+    def test_realistic_response_with_speak_first(self):
+        body = _runtime_config_json()
+        body["speak_first"] = False
+        cfg = AgentConfig.model_validate(body)
+        assert cfg.speak_first is False
+        assert cfg.name == "chris-claim-status"
+
+
 class TestAgentConfigValidation:
     def test_empty_config_fails_validation_name_required(self):
         with pytest.raises(ValidationError) as exc:

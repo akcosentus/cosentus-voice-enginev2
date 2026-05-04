@@ -278,7 +278,11 @@ def build_tts(agent: AgentConfig) -> ElevenLabsTTSService:
     )
 
 
-def build_llm(agent: AgentConfig, settings: Settings) -> AWSBedrockLLMService:
+def build_llm(
+    agent: AgentConfig,
+    settings: Settings,
+    system_instruction: str | None = None,
+) -> AWSBedrockLLMService:
     """Construct the AWS Bedrock Claude LLM service.
 
     Per-agent: ``llm.model`` (resolved to a full Bedrock inference
@@ -303,18 +307,35 @@ def build_llm(agent: AgentConfig, settings: Settings) -> AWSBedrockLLMService:
     identity prompt as if it were a user message). The
     ``system_instruction`` path is the documented Pipecat pattern.
 
+    Args:
+        agent: The per-call agent config.
+        settings: Layer 2 settings (provides ``aws_region``).
+        system_instruction: Optional pre-hydrated system prompt
+            override. When provided (e.g. by Layer 8 after running
+            Layer 5's hydrator over ``agent.system_prompt``), this
+            string is used verbatim. When ``None`` (default), falls
+            back to ``agent.system_prompt`` raw — preserves
+            backward compatibility with callers that don't yet
+            hydrate.
+
     Region comes from Layer 2 ``Settings.aws_region``. Credentials
     use boto3's default chain (Fargate task IAM role) — no explicit
     keys passed.
     """
     model_id = resolve_bedrock_model_id(agent.llm.model)
 
+    # Prefer the hydrated override; fall back to raw agent prompt
+    # for backwards compatibility (existing callers and tests).
+    effective_system_prompt = (
+        system_instruction if system_instruction is not None else agent.system_prompt
+    )
+
     llm_settings_kwargs: dict[str, object] = {
         # The system prompt always lives on the service via
         # system_instruction — not in LLMContext.messages — so it
         # survives context summarization and Bedrock honors it as
         # an actual system prompt.
-        "system_instruction": agent.system_prompt,
+        "system_instruction": effective_system_prompt,
         # Hardcoded ON. v1 had a per-agent flag that was always
         # logged but never wired — so caching was effectively off
         # platform-wide. Closing that gap here.

@@ -48,8 +48,9 @@ from dotenv import load_dotenv
 # of `app/` (i.e. `backend/voice-agent/`) here.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-# Layer 1, 2, 3, 4
+# Layer 1, 2, 3, 4, 5
 from app.config import Settings, load_agent_config  # noqa: E402
+from app.hydration.hydrator import hydrate_prompt  # noqa: E402
 from app.services import build_llm, build_stt, build_tts  # noqa: E402
 from app.tools import (  # noqa: E402
     ToolContext,
@@ -62,7 +63,7 @@ from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.frames.frames import TTSSpeakFrame
+from pipecat.frames.frames import LLMRunFrame, TTSSpeakFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -188,6 +189,7 @@ async def main() -> None:
             sys.exit("No stdin attached; rerun in a terminal.")
 
         # ── 4. Load real agent from real lambda ────────────────────────────
+        # (agent + speak_first state announced after load below.)
         logger.info("loading_agent_config", name=AGENT_NAME)
         agent = await load_agent_config(AGENT_NAME, settings=settings)
         logger.info(
@@ -202,13 +204,45 @@ async def main() -> None:
             tools=[t.type for t in agent.tools],
         )
 
-        # ── 5. Build STT / TTS / LLM via Layer 3 ───────────────────────────
-        # Layer 3's build_llm now passes system_instruction correctly
-        # (fix shipped 2026-05-04 in commit d8c4721); the round-1
-        # local override is gone.
+        # Announce conversation-start mode based on agent config.
+        print()
+        print("CONVERSATION START:")
+        if not agent.speak_first:
+            print("  Agent will NOT speak first — say something first to start.")
+        elif agent.first_message:
+            preview = agent.first_message[:60]
+            ellipsis = "..." if len(agent.first_message) > 60 else ""
+            print(f"  Agent will speak (static opener): {preview}{ellipsis}")
+        else:
+            print("  Agent will generate a dynamic opener from system_prompt.")
+        print()
+
+        # ── 5. Hydrate prompts via Layer 5 ─────────────────────────────────
+        # In production case_data comes from the dispatcher / batch row.
+        # The skeleton has no batch context, so case_data is empty —
+        # {{current_time}} still injects, every other placeholder
+        # strips to empty.
+        case_data: dict[str, object] = {}
+        hydrated_system_prompt = hydrate_prompt(agent.system_prompt, case_data)
+        hydrated_first_message = hydrate_prompt(agent.first_message, case_data)
+        logger.info(
+            "prompts_hydrated",
+            system_prompt_chars=len(hydrated_system_prompt),
+            first_message_chars=len(hydrated_first_message),
+            case_data_keys=list(case_data.keys()),
+            speak_first=agent.speak_first,
+        )
+
+        # ── 6. Build STT / TTS / LLM via Layer 3 ───────────────────────────
+        # Pass the hydrated system prompt via system_instruction so
+        # Layer 3 doesn't need to know about case_data.
         stt = build_stt(agent)
         tts = build_tts(agent)
-        llm = build_llm(agent, settings=settings)
+        llm = build_llm(
+            agent,
+            settings=settings,
+            system_instruction=hydrated_system_prompt,
+        )
         logger.info(
             "services_built",
             stt=type(stt).__name__,
@@ -216,7 +250,7 @@ async def main() -> None:
             llm=type(llm).__name__,
         )
 
-        # ── 6. Build Layer 4 tool registry + executor ──────────────────────
+        # ── 7. Build Layer 4 tool registry + executor ──────────────────────
         # Filters BUILTIN_TOOLS through (a) Settings.disabled_tools
         # and (b) the agent's tools[] opt-in list. Per-agent
         # description overrides + transfer_call's target enum are
@@ -229,15 +263,18 @@ async def main() -> None:
             tools=registry.names(),
         )
 
-        # ── 7. Seed the LLM context + attach tool catalog ──────────────────
+        # ── 8. Seed the LLM context + attach tool catalog ──────────────────
         # The system prompt lives on the LLM service via
-        # system_instruction (Layer 3); messages just seeds the
-        # bot's first-turn opener. tools= attaches the Layer 4
-        # registry's ToolsSchema so Claude sees the catalog when
-        # generating responses.
-        messages: list[dict] = [
-            {"role": "assistant", "content": agent.first_message},
-        ]
+        # system_instruction (Layer 3); messages seeds the
+        # conversation. With speak_first=True + non-empty
+        # first_message we pre-seed the bot's static opener as
+        # an assistant turn so the conversation history reflects
+        # what the user actually heard. With dynamic-opener
+        # (first_message="") or user-first (speak_first=False)
+        # the messages list starts empty.
+        messages: list[dict] = []
+        if agent.speak_first and hydrated_first_message:
+            messages.append({"role": "assistant", "content": hydrated_first_message})
         context = LLMContext(messages, tools=registry.to_tools_schema())
 
         # ── 8. Aggregator pair with the locked-in turn machinery ───────────
@@ -361,8 +398,30 @@ async def main() -> None:
         @transport.event_handler("on_client_connected")
         async def on_client_connected(transport_, client):
             logger.info("client_connected", client=client)
-            # Speak first_message via TTS directly (round-1 pattern).
-            await task.queue_frames([TTSSpeakFrame(agent.first_message)])
+
+            if not agent.speak_first:
+                # User-speaks-first mode. Bot waits silently; the
+                # first transcribed user input triggers the LLM
+                # via the normal pipeline path.
+                logger.info("user_speaks_first, bot waiting silently")
+                return
+
+            if hydrated_first_message:
+                # Static opener — speak it directly. No LLM round-
+                # trip; the assistant message is already seeded into
+                # the LLMContext above so future LLM calls see
+                # the conversation history correctly.
+                logger.info(
+                    "static_opener_being_spoken",
+                    text_chars=len(hydrated_first_message),
+                )
+                await task.queue_frames([TTSSpeakFrame(hydrated_first_message)])
+            else:
+                # Dynamic opener — let the LLM generate the first
+                # turn from system_instruction. messages list is
+                # empty at this point so Claude opens cold.
+                logger.info("llm_generating_dynamic_opener")
+                await task.queue_frames([LLMRunFrame()])
 
         @transport.event_handler("on_client_disconnected")
         async def on_client_disconnected(transport_, client):

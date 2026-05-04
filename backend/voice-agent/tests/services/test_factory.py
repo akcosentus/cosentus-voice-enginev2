@@ -420,3 +420,48 @@ class TestBuildLlm:
         settings_kwargs = mock_cls.Settings.call_args.kwargs
         assert settings_kwargs["system_instruction"] == prompt
         assert "{{template_variable}}" in settings_kwargs["system_instruction"]
+
+    def test_system_instruction_override_replaces_agent_prompt(
+        self, mocker, settings_fixture: Settings
+    ):
+        # Layer 5 hydrates agent.system_prompt and passes the result
+        # via the override. build_llm must prefer the override.
+        mock_cls = mocker.patch("app.services.factory.AWSBedrockLLMService")
+
+        agent = _agent(system_prompt="You are Chris. Today is {{current_time}}.")
+        hydrated = "You are Chris. Today is Monday, May 04, 2026 09:00 AM."
+        build_llm(agent, settings_fixture, system_instruction=hydrated)
+
+        settings_kwargs = mock_cls.Settings.call_args.kwargs
+        assert settings_kwargs["system_instruction"] == hydrated
+        # And the raw template must not have leaked in.
+        assert "{{current_time}}" not in settings_kwargs["system_instruction"]
+
+    def test_system_instruction_override_none_falls_back_to_agent(
+        self, mocker, settings_fixture: Settings
+    ):
+        # Backward compat: existing callers that don't pass the
+        # override still get agent.system_prompt verbatim.
+        mock_cls = mocker.patch("app.services.factory.AWSBedrockLLMService")
+
+        prompt = "You are a backwards-compat Chris."
+        build_llm(_agent(system_prompt=prompt), settings_fixture, system_instruction=None)
+
+        settings_kwargs = mock_cls.Settings.call_args.kwargs
+        assert settings_kwargs["system_instruction"] == prompt
+
+    def test_system_instruction_override_empty_string_honored(
+        self, mocker, settings_fixture: Settings
+    ):
+        # An explicit empty-string override is NOT the same as None.
+        # Caller is asking for an empty system prompt; honor it.
+        mock_cls = mocker.patch("app.services.factory.AWSBedrockLLMService")
+
+        build_llm(
+            _agent(system_prompt="non-empty raw"),
+            settings_fixture,
+            system_instruction="",
+        )
+
+        settings_kwargs = mock_cls.Settings.call_args.kwargs
+        assert settings_kwargs["system_instruction"] == ""
