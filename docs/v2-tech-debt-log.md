@@ -361,3 +361,75 @@ deleted entirely. Until then, Layer 8 just inherits the pattern.
 **Layer / file.** Layer 8 (future — pipeline builder); currently in
 `backend/voice-agent/scripts/walking_skeleton.py` (research artifact
 only).
+
+## Entry 11: `_BEDROCK_CLIENT` region captured at import time
+
+**What.** `app/persistence/post_call.py` constructs the boto3
+``bedrock-runtime`` client at module import using
+``os.environ.get("AWS_REGION", "us-east-1")``. The
+:func:`run_post_call_analyses` function accepts a ``settings:
+Settings`` parameter, but ``settings.aws_region`` is **not** used to
+configure the client — the region is bound before any ``Settings``
+instance exists. Same anti-pattern as Entry 4 for Layer 1's
+``_LAMBDA_CLIENT``, repeating in Layer 6.
+
+**Why we shipped it.** Module-level boto3 clients are the AWS-
+documented multithreading pattern (one shared thread-safe client
+across worker threads), and that requires the region at
+construction. Layer 6 imports cleanly before any Layer 9 runtime
+can construct ``Settings``. Avoiding the import-time read would
+require inverting the boot sequence or a lazy-init pattern, neither
+of which Layer 6 was the right scope for.
+
+In practice the two values agree at steady state — both
+``settings.aws_region`` and the import-time env read pull from
+``AWS_REGION`` — so production calls land on the right region. The
+debt is the hidden coupling: the function signature suggests the
+settings drive the client, but they don't.
+
+**Cost.** Two concrete issues:
+
+1. **Test isolation.** A test that overrides
+   ``Settings(aws_region="us-west-2")`` without also setting the
+   env var will still hit ``us-east-1`` (or whatever was in the
+   env at import). The settings are silently ignored at the boto3
+   layer.
+2. **Layer-boundary smell.** Layer 6 advertises ``settings`` as
+   the configuration source but actually consumes ``os.environ``
+   directly. A future maintainer who flips
+   ``Settings.aws_region`` will be surprised when the change
+   doesn't take effect on Bedrock calls.
+
+Operationally, AWS region is a deploy-time concern and never
+changes during a Fargate task's life, so this is shape /
+cleanliness debt, not a runtime risk.
+
+**Exit condition.** Lazy-init pattern: defer construction to the
+first call, using ``settings.aws_region`` from the
+``run_post_call_analyses`` parameter. Sketch::
+
+    _BEDROCK_CLIENT: BedrockClient | None = None
+    _BEDROCK_CLIENT_LOCK = asyncio.Lock()
+
+    async def _get_bedrock_client(settings: Settings) -> BedrockClient:
+        global _BEDROCK_CLIENT
+        if _BEDROCK_CLIENT is None:
+            async with _BEDROCK_CLIENT_LOCK:
+                if _BEDROCK_CLIENT is None:
+                    _BEDROCK_CLIENT = boto3.session.Session().client(
+                        "bedrock-runtime",
+                        region_name=settings.aws_region,
+                        config=BotoConfig(...),
+                    )
+        return _BEDROCK_CLIENT
+
+The client stays module-shared (constructed once, reused across
+calls); only the *binding* moment shifts. First call pays a
+~1 ms construction cost. The same pattern should land on
+``_LAMBDA_CLIENT`` in Layer 1 (Entry 4) at the same time so the
+two clients have the same lifecycle story. Layer 9 (runtime) is
+the natural place to apply both.
+
+**Layer / file.** Layer 6 —
+``backend/voice-agent/app/persistence/post_call.py`` module-level
+``_BEDROCK_CLIENT``. Cross-references Entry 4.
