@@ -34,6 +34,7 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "pytest-mock",
+    "pytest-aiohttp",
     "ruff",
 ]
 

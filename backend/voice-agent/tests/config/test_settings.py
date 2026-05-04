@@ -82,14 +82,33 @@ class TestSettingsRequiredFields:
 class TestSettingsDefaults:
     def test_optional_fields_use_documented_defaults(self, monkeypatch: pytest.MonkeyPatch):
         _set_required(monkeypatch)
+        # Strip any host-environment fields so we test pure defaults.
+        for env in (
+            "AWS_REGION",
+            "ENVIRONMENT",
+            "LOG_LEVEL",
+            "SERVICE_PORT",
+            "MAX_CONCURRENT_CALLS",
+            "DISABLED_TOOLS",
+            "DAILY_API_KEY",
+            "RECORDING_BUCKET",
+            "RECORDING_ROLE_ARN",
+        ):
+            monkeypatch.delenv(env, raising=False)
         s = _settings()
 
         assert s.aws_region == "us-east-1"
         assert s.environment == "production"
         assert s.log_level == "INFO"
         assert s.service_port == 8080
-        assert s.max_concurrent_calls == 4
+        # Layer 9 starting point; Layer 9.5 scale test will validate.
+        assert s.max_concurrent_calls == 6
         assert s.disabled_tools == ""
+        # Layer 9 fields default to empty so local dev / unit tests
+        # don't require Daily / S3 access just to construct Settings.
+        assert s.daily_api_key == ""
+        assert s.recording_bucket == ""
+        assert s.recording_role_arn == ""
 
 
 # ── Type coercion ───────────────────────────────────────────────────────────

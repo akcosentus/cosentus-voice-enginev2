@@ -83,10 +83,34 @@ class Settings(BaseSettings):
     service_port: int = 8080
     """Port the FastAPI HTTP entrypoint binds on inside the Fargate task."""
 
-    max_concurrent_calls: int = 4
+    max_concurrent_calls: int = 6
     """Per-task maximum concurrent voice sessions. Auto-scaling adds
     tasks above this threshold; concurrency above this on a single
-    task degrades audio quality."""
+    task degrades audio quality. Initial value 6 is a starting point;
+    Layer 9.5 scale testing will validate or adjust to 4 or 8."""
+
+    # ── Layer 9 (runner) ────────────────────────────────────────────────
+
+    daily_api_key: str = ""
+    """Daily.co API key. Used by Layer 9's ``DailyRoomClient`` to
+    create rooms and mint meeting tokens. Empty default permits
+    boot in a test environment without Daily access; the runner
+    itself fails fast at room-creation time if the key is unset."""
+
+    recording_bucket: str = ""
+    """S3 bucket Daily uses for cloud recording uploads. Set on each
+    room's ``recordings_bucket.bucket_name`` property at room
+    creation time. Empty default means recordings are disabled —
+    the room is created without ``recordings_bucket``, falling back
+    to Daily's default storage. Production sets this."""
+
+    recording_role_arn: str = ""
+    """IAM role ARN Daily assumes when writing recordings to the
+    bucket. Required when ``recording_bucket`` is set; ignored
+    otherwise. Set on each room's ``recordings_bucket.assume_role_arn``
+    property at room creation time. The trust policy on the role
+    grants Daily's signing principal sts:AssumeRole; the role's
+    permission policy grants s3:PutObject on the bucket."""
 
     # ── Operator kill-switch ────────────────────────────────────────────
 
