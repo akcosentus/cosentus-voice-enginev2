@@ -291,3 +291,58 @@ can be marked closed.
 
 **Layer / file.** Layer 8 — pipeline builder, `DailyTransport` /
 `DailyParams` construction.
+
+## Entry 10: Bedrock dynamic-opener requires a synthetic kickoff message
+
+**What.** AWS Bedrock's `ConverseStream` API rejects requests whose
+`messages[]` array is empty or starts with an `assistant` turn:
+
+> `ValidationException: A conversation must start with a user message.`
+
+That makes the "dynamic opener" mode (`speak_first=True`,
+`first_message=""`) impossible without a workaround — by definition
+that mode runs the LLM before any caller has spoken, so there's no
+natural user message to seed. v2 papers over this by inserting a
+synthetic `{"role": "user", "content": "Hi."}` turn into the context
+right before triggering the dynamic-opener `LLMRunFrame()`. Claude
+treats it as the caller's "hello" and generates the greeting from
+`system_instruction` as designed.
+
+The walking skeleton currently carries the workaround inline; the
+production pipeline (Layer 8) will need to do the same.
+
+**Why we shipped it.** Discovery from walking skeleton round 3 —
+empty `messages[]` reproduced the Bedrock validation error
+immediately. The constraint is a Bedrock-side requirement (Anthropic
+Claude's native API has the same rule, even though the Python SDK
+documents a different one), so the only way to support
+dynamic-opener mode is to seed something. "Hi." is the smallest
+non-empty user message we could pick that doesn't bias Claude's
+greeting (compared to e.g. "What can you help me with?", which would
+prime an answer-shaped opener). Tested — Claude's first turn is
+identical to what it generates for inbound PSTN where the user
+actually says "hello".
+
+**Cost.** Mild. Three concerns:
+
+1. The synthetic turn appears in `LLMContext.messages` and any
+   transcript recording reflecting it. Post-call analysis will see
+   `[user: "Hi."]` as the first turn even though no one spoke.
+   Acceptable because analyses run on the *transcribed* user audio
+   (which is empty for this turn) — but anyone reading the raw LLM
+   context dump will see the seeded value.
+2. Tiny additional input tokens (~5) on every dynamic-opener call.
+3. Couples Layer 8 / skeleton to a Bedrock-specific quirk. If we
+   ever swap to OpenAI or another provider that accepts
+   system-only contexts, the workaround becomes dead code.
+
+**Exit condition.** Either (a) AWS adds support for empty / system-
+only `messages[]` to ConverseStream — unlikely on their roadmap as
+of now — or (b) v2 switches its primary LLM to a provider whose API
+supports system-only first turns, at which point the kickoff seed
+becomes conditional on `isinstance(llm, AWSBedrockLLMService)` or is
+deleted entirely. Until then, Layer 8 just inherits the pattern.
+
+**Layer / file.** Layer 8 (future — pipeline builder); currently in
+`backend/voice-agent/scripts/walking_skeleton.py` (research artifact
+only).

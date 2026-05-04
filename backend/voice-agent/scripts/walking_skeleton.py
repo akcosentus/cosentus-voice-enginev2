@@ -265,16 +265,35 @@ async def main() -> None:
 
         # ── 8. Seed the LLM context + attach tool catalog ──────────────────
         # The system prompt lives on the LLM service via
-        # system_instruction (Layer 3); messages seeds the
-        # conversation. With speak_first=True + non-empty
-        # first_message we pre-seed the bot's static opener as
-        # an assistant turn so the conversation history reflects
-        # what the user actually heard. With dynamic-opener
-        # (first_message="") or user-first (speak_first=False)
-        # the messages list starts empty.
+        # system_instruction (Layer 3). The messages list seeds
+        # the conversation differently per opener mode:
+        #
+        #   * Static opener (speak_first=True, first_message non-
+        #     empty): pre-seed an assistant turn so conversation
+        #     history reflects what the user actually heard.
+        #
+        #   * Dynamic opener (speak_first=True, first_message
+        #     empty): Bedrock's ConverseStream API requires the
+        #     first message to be ``role="user"`` — empty
+        #     messages[] gets rejected with "A conversation must
+        #     start with a user message." We seed a synthetic
+        #     kickoff user turn ("Hi.") which gives Bedrock
+        #     something to respond to; Claude treats it as the
+        #     caller answering the line and generates the greeting
+        #     from system_instruction.
+        #
+        #   * User-first (speak_first=False): empty messages[] is
+        #     fine because the LLM only runs after the user's
+        #     first transcribed turn — by then there's a real user
+        #     message in context.
         messages: list[dict] = []
         if agent.speak_first and hydrated_first_message:
             messages.append({"role": "assistant", "content": hydrated_first_message})
+        elif agent.speak_first and not hydrated_first_message:
+            # Dynamic-opener kickoff. A real PSTN call has no
+            # natural "user said hello" event before the bot
+            # speaks; this synthetic turn unblocks Bedrock.
+            messages.append({"role": "user", "content": "Hi."})
         context = LLMContext(messages, tools=registry.to_tools_schema())
 
         # ── 8. Aggregator pair with the locked-in turn machinery ───────────
