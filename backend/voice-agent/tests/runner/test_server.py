@@ -335,6 +335,149 @@ async def test_dialin_webhook_400_without_to(aiohttp_client):
     assert resp.status == 400
 
 
+# ── _lookup_inbound_agent: real lambda envelope shape ────────────────────
+#
+# These tests exercise the actual JSON parsing in
+# ``_lookup_inbound_agent`` against the exact response shape
+# emitted by the medcloud-voice-api lambda — the gap that hid the
+# Phase 2 inbound-test blocker. The webhook integration tests
+# above stub ``_lookup_inbound_agent`` itself, so they're blind to
+# field-name mismatches between Layer 9 and the API surface.
+
+
+def _build_lambda_invoke_response(*, status_code: int = 200, body: dict | None = None) -> MagicMock:
+    """Build the boto3 ``client.invoke()`` return shape.
+
+    ``Payload`` is a ``StreamingBody``-like object exposing ``read()``;
+    ``read()`` returns the JSON-encoded API Gateway envelope (the
+    lambda is API-Gateway-shaped under the hood).
+    """
+    import json as _json
+
+    envelope = {
+        "statusCode": status_code,
+        "body": _json.dumps(body) if body is not None else "{}",
+        "headers": {"Content-Type": "application/json"},
+    }
+    payload_bytes = _json.dumps(envelope).encode("utf-8")
+    payload_mock = MagicMock()
+    payload_mock.read = MagicMock(return_value=payload_bytes)
+    return {"Payload": payload_mock}
+
+
+@pytest.mark.asyncio
+async def test_lookup_inbound_agent_parses_nested_inbound_agent_object():
+    """The lambda returns body.inbound_agent.{id,name,display_name}.
+    Layer 9 must reach into the nested ``id`` field — the prior
+    code read flat ``inbound_agent_id`` and silently failed every
+    real inbound call.
+    """
+    from app.runner.server import _lookup_inbound_agent
+
+    real_shape = {
+        "id": "72627663-c42f-4e26-8a5a-26bff07a561e",
+        "number": "+12098075018",
+        "friendly_name": "Dev Daily test",
+        "provider": "daily",
+        "is_active": True,
+        "inbound_agent": {
+            "id": "576b22a4-42ad-4ac1-8a2b-7067fb5c5cd4",
+            "name": "chris-claim-status",
+            "display_name": "Chris Claim Status",
+        },
+        "outbound_agent": None,
+    }
+    lambda_client_mock = MagicMock()
+    lambda_client_mock.invoke = MagicMock(
+        return_value=_build_lambda_invoke_response(body=real_shape)
+    )
+
+    with patch(
+        "app.config.agent_config._get_lambda_client",
+        return_value=lambda_client_mock,
+    ):
+        result = await _lookup_inbound_agent("+12098075018", _settings())
+
+    assert result == "576b22a4-42ad-4ac1-8a2b-7067fb5c5cd4"
+
+
+@pytest.mark.asyncio
+async def test_lookup_inbound_agent_returns_none_when_inbound_agent_null():
+    """Number is provisioned but has no inbound mapping (e.g., this
+    number is outbound-only: ``inbound_agent: null``)."""
+    from app.runner.server import _lookup_inbound_agent
+
+    outbound_only_shape = {
+        "id": "abc",
+        "number": "+19998887777",
+        "is_active": True,
+        "inbound_agent": None,
+        "outbound_agent": {
+            "id": "outbound-agent-id",
+            "name": "outbound-only-agent",
+        },
+    }
+    lambda_client_mock = MagicMock()
+    lambda_client_mock.invoke = MagicMock(
+        return_value=_build_lambda_invoke_response(body=outbound_only_shape)
+    )
+
+    with patch(
+        "app.config.agent_config._get_lambda_client",
+        return_value=lambda_client_mock,
+    ):
+        result = await _lookup_inbound_agent("+19998887777", _settings())
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_lookup_inbound_agent_returns_none_on_404():
+    """Unknown phone number — lambda returns 404 with detail."""
+    from app.runner.server import _lookup_inbound_agent
+
+    lambda_client_mock = MagicMock()
+    lambda_client_mock.invoke = MagicMock(
+        return_value=_build_lambda_invoke_response(
+            status_code=404, body={"detail": "Phone number not found"}
+        )
+    )
+
+    with patch(
+        "app.config.agent_config._get_lambda_client",
+        return_value=lambda_client_mock,
+    ):
+        result = await _lookup_inbound_agent("+10000000000", _settings())
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_lookup_inbound_agent_returns_none_when_id_empty_string():
+    """Defensive: lambda returns ``inbound_agent: {}`` or ``inbound_agent: {"id": ""}``."""
+    from app.runner.server import _lookup_inbound_agent
+
+    lambda_client_mock = MagicMock()
+    lambda_client_mock.invoke = MagicMock(
+        return_value=_build_lambda_invoke_response(
+            body={
+                "id": "x",
+                "number": "+1",
+                "is_active": True,
+                "inbound_agent": {"id": ""},
+            }
+        )
+    )
+
+    with patch(
+        "app.config.agent_config._get_lambda_client",
+        return_value=lambda_client_mock,
+    ):
+        result = await _lookup_inbound_agent("+1", _settings())
+
+    assert result is None
+
+
 # ── graceful_drain ───────────────────────────────────────────────────────
 
 

@@ -336,7 +336,7 @@ async def _load_api_key(settings: Settings) -> str:
 
 
 async def _lookup_inbound_agent(to_number: str, settings: Settings) -> str | None:
-    """Resolve ``to_number`` → ``inbound_agent_id`` via the API lambda.
+    """Resolve ``to_number`` → inbound agent id via the API lambda.
 
     Reuses Layer 1's hardened ``_get_lambda_client(settings)`` for
     timeout + adaptive retry. Returns ``None`` on any failure path
@@ -344,6 +344,25 @@ async def _lookup_inbound_agent(to_number: str, settings: Settings) -> str | Non
     caller (dialin webhook handler) maps ``None`` to a 503 so Daily
     retries — temporary issues self-heal; permanent issues page
     operations.
+
+    The lambda returns the agent under a NESTED ``inbound_agent``
+    object (mirrors the same shape exposed to the dashboard for
+    list views), e.g.::
+
+        {
+            "id": "...",                      # phone number row id
+            "number": "+12098075018",
+            "inbound_agent": {
+                "id": "<agent_id>",
+                "name": "...",
+                "display_name": "..."
+            },
+            "outbound_agent": null
+        }
+
+    First inbound test of v2 caught this — the prior implementation
+    read the wrong key (``inbound_agent_id``, flat) and never
+    spawned a bot for any real call.
     """
     from app.config.agent_config import _get_lambda_client
 
@@ -395,7 +414,11 @@ async def _lookup_inbound_agent(to_number: str, settings: Settings) -> str | Non
         data = json.loads(body_text)
     except (ValueError, json.JSONDecodeError):
         return None
-    return data.get("inbound_agent_id")
+    inbound_agent = data.get("inbound_agent")
+    if not isinstance(inbound_agent, dict):
+        return None
+    agent_id = inbound_agent.get("id")
+    return agent_id if isinstance(agent_id, str) and agent_id else None
 
 
 # ── Graceful drain ────────────────────────────────────────────────────────
