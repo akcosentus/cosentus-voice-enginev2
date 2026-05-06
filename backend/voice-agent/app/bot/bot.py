@@ -67,7 +67,6 @@ from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnal
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import (
-    EndFrame,
     FunctionCallResultProperties,
     LLMRunFrame,
     TTSSpeakFrame,
@@ -432,6 +431,32 @@ async def run_bot(
         await task.queue_frames([LLMRunFrame()])
         logger.info("opener_dynamic_dispatched", call_id=call_id)
 
+    # ── Cancellation guard ────────────────────────────────────────────
+    # PipelineTask.cancel() is itself idempotent (see ``_finished`` /
+    # ``_cancelled`` guards in pipecat 1.1.0 task.py:520-617). The
+    # closure-local guard here is cheap insurance with two extra
+    # benefits beyond Pipecat's own:
+    #
+    # 1. Preserves the FIRST cancel reason — more actionable than
+    #    the second. When the caller hangs up, both
+    #    ``on_participant_left`` and ``on_client_disconnected``
+    #    fire (Daily's ``_on_participant_left`` dispatches both
+    #    sequentially — verified in Pipecat
+    #    transports/daily/transport.py:2958-2964). Without this
+    #    guard, the cancel reason that lands on the pipeline is
+    #    "client_disconnected" (the second alias) instead of
+    #    "participant_left" (the actual semantic event).
+    # 2. Suppresses redundant log noise — only the first cancel
+    #    path logs its triggering event; subsequent ones short-
+    #    circuit silently.
+    cancel_state: dict[str, bool] = {"cancelled": False}
+
+    async def safe_cancel(reason: str) -> None:
+        if cancel_state["cancelled"]:
+            return
+        cancel_state["cancelled"] = True
+        await task.cancel(reason=reason)
+
     # ── Event handlers ────────────────────────────────────────────────
 
     @transport.event_handler("on_first_participant_joined")
@@ -455,23 +480,39 @@ async def run_bot(
                     dialout_settings,
                 )
                 if error:
+                    # Sync-return error — the dialout request was
+                    # refused before any ringing happened (e.g.
+                    # caller-id not authorized in Daily, malformed
+                    # phoneNumber). There's no SIP leg to drain.
+                    # Cancel immediately so the bot doesn't strand
+                    # in an empty room until idle_timeout. Yesterday's
+                    # outbound PSTN test caught this.
                     logger.error(
-                        "dialout_failed",
+                        "dialout_failed_sync",
                         call_id=call_id,
                         error=str(error),
+                        target_number=target_number,
+                        from_number=from_number,
                     )
-                else:
-                    logger.info(
-                        "dialout_initiated",
-                        call_id=call_id,
-                        dialout_session_id=dialout_session_id,
-                    )
-            except Exception as exc:  # noqa: BLE001 — log + continue
+                    await safe_cancel("dialout_failed_sync")
+                    return
+                logger.info(
+                    "dialout_initiated",
+                    call_id=call_id,
+                    dialout_session_id=dialout_session_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Unexpected exception (network blip, SDK bug, etc.).
+                # Cancel for the same reason as the sync-return path:
+                # without a SIP leg there's nothing to drain.
                 logger.exception(
                     "dialout_unexpected_error",
                     call_id=call_id,
                     error=str(exc),
+                    target_number=target_number,
+                    from_number=from_number,
                 )
+                await safe_cancel("dialout_unexpected_error")
 
     @transport.event_handler("on_dialin_connected")
     async def on_dialin_connected(transport_, data):
@@ -500,13 +541,46 @@ async def run_bot(
 
     @transport.event_handler("on_dialin_stopped")
     async def on_dialin_stopped(transport_, data):
-        logger.info("dialin_stopped", call_id=call_id)
-        await task.queue_frames([EndFrame()])
+        # Inbound SIP leg disconnected (caller hung up).
+        # task.cancel() over EndFrame: Pipecat PR #1100 — "EndFrame
+        # drains internal queue, could take seconds; cancel stops
+        # immediately when there is nothing more to send."
+        # Avoids the EndFrame hang race in pipecat issue #3757.
+        logger.info("dialin_stopped", call_id=call_id, data=data)
+        await safe_cancel("dialin_stopped")
 
     @transport.event_handler("on_dialout_stopped")
     async def on_dialout_stopped(transport_, data):
-        logger.info("dialout_stopped", call_id=call_id)
-        await task.queue_frames([EndFrame()])
+        # Outbound SIP leg ended (callee hung up or RUNTIME failure
+        # like busy / no-answer-timeout / SIP REFER drop). Same
+        # rationale as on_dialin_stopped.
+        logger.info("dialout_stopped", call_id=call_id, data=data)
+        await safe_cancel("dialout_stopped")
+
+    @transport.event_handler("on_dialout_error")
+    async def on_dialout_error(transport_, data):
+        # Distinct from the sync-return error in on_joined. This is
+        # the RUNTIME failure path — start_dialout returned success
+        # but a later phase (ringing, pickup, mid-bridge) failed.
+        # Fires 5-60+ seconds after start_dialout. Without this
+        # handler the bot strands until idle_timeout (5 min).
+        logger.error(
+            "dialout_failed_async",
+            call_id=call_id,
+            data=data,
+        )
+        await safe_cancel("dialout_failed_async")
+
+    @transport.event_handler("on_dialin_error")
+    async def on_dialin_error(transport_, data):
+        # Symmetric with on_dialout_error. Inbound SIP bridge
+        # failures: handshake fail, mid-call drop, etc.
+        logger.error(
+            "dialin_failed",
+            call_id=call_id,
+            data=data,
+        )
+        await safe_cancel("dialin_failed")
 
     @transport.event_handler("on_participant_left")
     async def on_participant_left(transport_, participant, reason):
@@ -516,7 +590,43 @@ async def run_bot(
             participant_id=participant.get("id") if participant else None,
             reason=reason,
         )
-        await task.queue_frames([EndFrame()])
+        await safe_cancel("participant_left")
+
+    @transport.event_handler("on_client_disconnected")
+    async def on_client_disconnected(transport_, client):
+        # Daily's ``_on_participant_left`` (transport.py:2958-2964)
+        # dispatches BOTH ``on_participant_left`` AND
+        # ``on_client_disconnected`` for every leg type — PSTN,
+        # browser, bot. We register both as defense-in-depth in
+        # case Pipecat's alias mapping ever changes. The
+        # safe_cancel guard ensures only the first one drives the
+        # actual cancel; the second short-circuits.
+        logger.info("client_disconnected", call_id=call_id)
+        await safe_cancel("client_disconnected")
+
+    @transport.event_handler("on_error")
+    async def on_transport_error(transport_, error):
+        # Generic transport-level errors — websocket signalling
+        # failure, ICE candidate exhaustion, Daily-API-internal
+        # errors. Distinct from ErrorFrames in the pipeline (which
+        # Layer 7's ErrorObserver catches).
+        #
+        # Logging only — do NOT cancel here. Some transport errors
+        # are recoverable (transient signalling glitches). Let the
+        # pipeline's idle_timeout catch terminal failures so we
+        # don't kill calls that recover on their own.
+        logger.error(
+            "transport_error",
+            call_id=call_id,
+            error=str(error),
+        )
+
+    @transport.event_handler("on_left")
+    async def on_left(transport_):
+        # Receipt that the transport actually finished tearing down
+        # before run_bot's finally block fires. Helps diagnose stuck
+        # cleanups in production.
+        logger.info("transport_left", call_id=call_id)
 
     # ── Run pipeline + finalize ───────────────────────────────────────
     # PipelineRunner with both signal flags off — Layer 9 owns

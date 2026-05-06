@@ -374,23 +374,31 @@ class PipelineManager:
         Stops itself when ``active_sessions`` empties. The next
         ``_spawn`` 0→1 transition restarts a fresh task.
 
-        Cancellation (process shutdown) is silent. Other exceptions
-        log + continue — a bad heartbeat shouldn't kill protection
-        permanently.
+        Per-iteration error handling: a single transient renew
+        failure (network blip, throttling) logs and is retried on
+        the next tick. Previously the try/except wrapped the entire
+        loop, so the FIRST iteration error killed protection
+        permanently for the remainder of all in-flight calls
+        (potentially 30 minutes — until ECS Agent expired the
+        existing protection). That's the latent bug this guard
+        closes.
+
+        Cancellation (process shutdown) returns cleanly.
         """
-        try:
-            while len(self._active_sessions) > 0:
+        while len(self._active_sessions) > 0:
+            try:
                 await asyncio.sleep(_HEARTBEAT_INTERVAL_SECS)
                 if len(self._active_sessions) > 0:
                     await self._protection.renew_if_protected()
-        except asyncio.CancelledError:
-            pass
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "heartbeat_loop_error",
-                error=str(exc),
-                error_type=type(exc).__name__,
-            )
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "heartbeat_loop_iteration_error",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+                # Continue — next iteration retries.
 
     async def shutdown(self) -> None:
         """Mark the manager as draining. Called from

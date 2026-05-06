@@ -351,3 +351,84 @@ async def test_shutdown_sets_draining():
     assert m.is_draining is False
     await m.shutdown()
     assert m.is_draining is True
+
+
+# ── _heartbeat_loop per-iteration error handling (Phase 2 #8) ───────────
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_iteration_error_does_not_kill_loop(monkeypatch):
+    """Pre-fix: a single ``renew_if_protected`` exception killed the
+    loop for the call's lifetime (up to 30 min until ECS expired
+    protection). v2 logs the error and retries on the next tick.
+    """
+    monkeypatch.setattr("app.runner.manager._HEARTBEAT_INTERVAL_SECS", 0)
+
+    daily = _daily_mock()
+    protection = _protection_mock()
+    call_count = {"n": 0}
+
+    async def flaky_renew():
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("transient throttling")
+        # Subsequent iterations succeed.
+        return True
+
+    protection.renew_if_protected = AsyncMock(side_effect=flaky_renew)
+    m = PipelineManager(_settings(), daily, protection)
+
+    # Stage active sessions so the loop has work to do, then drive
+    # several iterations.
+    m._active_sessions["call-a"] = MagicMock()
+    loop_task = asyncio.create_task(m._heartbeat_loop())
+
+    # Yield enough times for at least 3 iterations to land.
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if call_count["n"] >= 3:
+            break
+
+    # Drain the active sessions to let the loop exit cleanly.
+    m._active_sessions.clear()
+    await asyncio.wait_for(loop_task, timeout=1.0)
+
+    assert call_count["n"] >= 2  # one error + at least one retry
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_cancelled_error_exits_cleanly(monkeypatch):
+    """SIGTERM cancels the heartbeat. CancelledError must return
+    cleanly — never re-raise (re-raise would propagate up to the
+    spawn site where the task was created and emit a noisy traceback).
+    """
+    monkeypatch.setattr("app.runner.manager._HEARTBEAT_INTERVAL_SECS", 0)
+
+    daily = _daily_mock()
+    protection = _protection_mock()
+    m = PipelineManager(_settings(), daily, protection)
+
+    m._active_sessions["call-a"] = MagicMock()
+    loop_task = asyncio.create_task(m._heartbeat_loop())
+    await asyncio.sleep(0)  # let it start
+
+    loop_task.cancel()
+
+    # Should NOT raise — the loop catches CancelledError and returns.
+    result = await loop_task
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_exits_when_active_sessions_empty(monkeypatch):
+    """Loop terminates naturally when the dict empties — the next
+    spawn 0→1 transition restarts a fresh task.
+    """
+    monkeypatch.setattr("app.runner.manager._HEARTBEAT_INTERVAL_SECS", 0)
+
+    daily = _daily_mock()
+    protection = _protection_mock()
+    m = PipelineManager(_settings(), daily, protection)
+    # Empty by construction — loop should return immediately.
+    await asyncio.wait_for(m._heartbeat_loop(), timeout=1.0)
+    protection.renew_if_protected.assert_not_called()

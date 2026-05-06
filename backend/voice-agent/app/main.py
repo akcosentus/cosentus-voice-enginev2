@@ -102,6 +102,18 @@ async def amain() -> None:
     loop = asyncio.get_running_loop()
     shutdown_event = asyncio.Event()
 
+    # Strong references to outstanding shutdown tasks. Without this,
+    # asyncio.create_task's returned task can be garbage-collected
+    # before _drain_and_shutdown reaches its first await point —
+    # which was the root cause of yesterday's missing graceful_drain
+    # logs on SIGTERM. Per Python docs:
+    #   "A task that isn't referenced elsewhere may get garbage
+    #   collected at any time, even before it's done."
+    #   https://docs.python.org/3/library/asyncio-task.html#asyncio.create_task
+    # The same docs prescribe this exact pattern — collection +
+    # add_done_callback for fire-and-forget background tasks.
+    shutdown_tasks: set[asyncio.Task] = set()
+
     async def _drain_and_shutdown(sig_name: str) -> None:
         logger.info("signal_handling_started", signal=sig_name)
         await graceful_drain(manager, protection)
@@ -113,10 +125,12 @@ async def amain() -> None:
         logger.info("signal_received", signal=sig_name)
         # Schedule the drain coroutine on the loop. Sync handler
         # returns immediately; the drain runs as a separate task.
-        asyncio.create_task(
+        task = asyncio.create_task(
             _drain_and_shutdown(sig_name),
             name=f"shutdown-{sig_name}",
         )
+        shutdown_tasks.add(task)
+        task.add_done_callback(shutdown_tasks.discard)
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, _signal_handler, sig.name)

@@ -30,7 +30,7 @@ from app.bot.bot import (
 )
 from app.config.agent_config import AgentConfig, ToolConfig
 from app.config.settings import Settings
-from pipecat.frames.frames import EndFrame, LLMRunFrame, TTSSpeakFrame
+from pipecat.frames.frames import LLMRunFrame, TTSSpeakFrame
 from pipecat.runner.types import DailyRunnerArguments, RunnerArguments
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
@@ -90,6 +90,7 @@ def _patch_run_bot_dependencies(*, agent: AgentConfig | None = None):
     pl_task_mock = MagicMock()
     pl_task_mock.queue_frame = AsyncMock()
     pl_task_mock.queue_frames = AsyncMock()
+    pl_task_mock.cancel = AsyncMock()
 
     def _pipeline_task_factory(*args, **kwargs):
         mocks["pipeline_task_args"] = args
@@ -167,6 +168,7 @@ def _record_task(mocks, *args, **kwargs):
     pl_task_mock = MagicMock()
     pl_task_mock.queue_frame = AsyncMock()
     pl_task_mock.queue_frames = AsyncMock()
+    pl_task_mock.cancel = AsyncMock()
     mocks["pipeline_task"] = pl_task_mock
     return pl_task_mock
 
@@ -667,7 +669,12 @@ async def test_inbound_does_not_call_start_dialout():
 
 
 @pytest.mark.asyncio
-async def test_participant_left_queues_end_frame():
+async def test_participant_left_calls_task_cancel_with_reason():
+    """v2: switched from queue_frames([EndFrame()]) to task.cancel().
+    Pipecat PR #1100 — EndFrame drains internal queue (could take
+    seconds); cancel stops immediately when there is nothing more
+    to send. Avoids EndFrame-hang race in pipecat issue #3757.
+    """
     agent, mocks = _patch_run_bot_dependencies()
     transport = _make_transport_mock()
     patches = _start_run_bot_patches(agent, mocks, transport)
@@ -683,8 +690,9 @@ async def test_participant_left_queues_end_frame():
     await handler(transport, {"id": "p1"}, "left")
 
     pt = mocks["pipeline_task"]
-    queued = [c.args[0] for c in pt.queue_frames.call_args_list]
-    assert any(any(isinstance(f, EndFrame) for f in frames) for frames in queued)
+    pt.cancel.assert_awaited_once_with(reason="participant_left")
+    # And NOT EndFrame — that's the bug v2 closes.
+    pt.queue_frames.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -793,3 +801,357 @@ async def test_bot_passes_transport_params_dict_with_daily_factory(monkeypatch):
     assert daily_params.audio_in_enabled is True
     assert daily_params.audio_in_sample_rate == 8000
     assert daily_params.audio_out_sample_rate == 24000
+
+
+# ── Phase 2 termination handlers (CHANGE 1-7) ────────────────────────────
+
+
+async def _setup_run_bot(
+    *,
+    agent_kwargs: dict | None = None,
+    direction: str = "inbound",
+    dialout_settings: dict | None = None,
+    transport_overrides=None,
+):
+    """Run ``run_bot`` once with patched dependencies and return the
+    transport handler dict + pipeline_task mock for inspection.
+    """
+    agent_kwargs = agent_kwargs or {"speak_first": True, "first_message": "Hi."}
+    agent, mocks = _patch_run_bot_dependencies(agent=_agent(**agent_kwargs))
+    transport = _make_transport_mock()
+    if transport_overrides:
+        transport_overrides(transport)
+    patches = _start_run_bot_patches(agent, mocks, transport)
+    for p in patches:
+        p.start()
+    try:
+        body = {}
+        if dialout_settings is not None:
+            body["dialout_settings"] = dialout_settings
+        await run_bot(transport, _runner_args(direction=direction, **body), _settings())
+    finally:
+        for p in patches:
+            p.stop()
+    return transport, mocks
+
+
+@pytest.mark.asyncio
+async def test_handler_registry_is_complete_after_run_bot():
+    """All 11 transport event handlers must be registered.
+
+    Phase 2 brief expanded the set with on_dialout_error,
+    on_dialin_error, on_client_disconnected, on_error, on_left.
+    """
+    transport, _ = await _setup_run_bot()
+    expected = {
+        "on_first_participant_joined",
+        "on_joined",
+        "on_dialin_connected",
+        "on_dialout_connected",
+        "on_dialin_stopped",
+        "on_dialout_stopped",
+        "on_dialout_error",
+        "on_dialin_error",
+        "on_participant_left",
+        "on_client_disconnected",
+        "on_error",
+        "on_left",
+    }
+    assert expected.issubset(set(transport._handlers.keys()))
+
+
+# CHANGE 1 — on_joined sync-return error → task.cancel("dialout_failed_sync")
+
+
+@pytest.mark.asyncio
+async def test_on_joined_sync_error_cancels_with_dialout_failed_sync():
+    """The exact failure mode that stranded yesterday's first call."""
+
+    def _override(t):
+        t.start_dialout = AsyncMock(return_value=(None, "Incorrect callerID"))
+
+    transport, mocks = await _setup_run_bot(
+        direction="outbound",
+        dialout_settings={"phoneNumber": "+1...", "callerId": "+1..."},
+        transport_overrides=_override,
+    )
+    on_joined = transport._handlers["on_joined"]
+    await on_joined(transport, {})
+
+    pt = mocks["pipeline_task"]
+    pt.cancel.assert_awaited_once_with(reason="dialout_failed_sync")
+
+
+@pytest.mark.asyncio
+async def test_on_joined_sync_success_does_not_cancel():
+    """Happy outbound path — start_dialout returns (session_id, None)."""
+    transport, mocks = await _setup_run_bot(
+        direction="outbound",
+        dialout_settings={"phoneNumber": "+1...", "callerId": "+1..."},
+    )
+    on_joined = transport._handlers["on_joined"]
+    await on_joined(transport, {})
+
+    pt = mocks["pipeline_task"]
+    pt.cancel.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_on_joined_sync_error_logs_target_and_from_numbers(caplog):
+    """The dialout_failed_sync log line must include target/from_number
+    so we can correlate the bug to the call row at debug time.
+    """
+
+    def _override(t):
+        t.start_dialout = AsyncMock(return_value=(None, "blocked"))
+
+    agent, mocks = _patch_run_bot_dependencies(agent=_agent(speak_first=True))
+    transport = _make_transport_mock()
+    _override(transport)
+    patches = _start_run_bot_patches(agent, mocks, transport)
+    for p in patches:
+        p.start()
+    try:
+        # Provide explicit target/from numbers we can assert against.
+        ra = DailyRunnerArguments(
+            room_url="https://cosentus.daily.co/r-xyz",
+            token="t",
+            body={
+                "agent_id": "a",
+                "direction": "outbound",
+                "target_number": "+19998887777",
+                "from_number": "+12098210846",
+                "dialout_settings": {
+                    "phoneNumber": "+19998887777",
+                    "callerId": "+12098210846",
+                },
+            },
+        )
+        await run_bot(transport, ra, _settings())
+    finally:
+        for p in patches:
+            p.stop()
+
+    on_joined = transport._handlers["on_joined"]
+    with patch("app.bot.bot.logger") as mock_logger:
+        await on_joined(transport, {})
+        error_calls = [c for c in mock_logger.error.call_args_list if c.args]
+        sync_failure = next(c for c in error_calls if c.args[0] == "dialout_failed_sync")
+        assert sync_failure.kwargs["target_number"] == "+19998887777"
+        assert sync_failure.kwargs["from_number"] == "+12098210846"
+
+
+@pytest.mark.asyncio
+async def test_on_joined_unexpected_exception_cancels():
+    """If start_dialout raises, we cancel — no SIP leg to drain."""
+
+    def _override(t):
+        t.start_dialout = AsyncMock(side_effect=RuntimeError("network blip"))
+
+    transport, mocks = await _setup_run_bot(
+        direction="outbound",
+        dialout_settings={"phoneNumber": "+1...", "callerId": "+1..."},
+        transport_overrides=_override,
+    )
+    on_joined = transport._handlers["on_joined"]
+    await on_joined(transport, {})
+
+    pt = mocks["pipeline_task"]
+    pt.cancel.assert_awaited_once_with(reason="dialout_unexpected_error")
+
+
+# CHANGE 2 — on_dialout_error → task.cancel("dialout_failed_async")
+
+
+@pytest.mark.asyncio
+async def test_on_dialout_error_cancels_with_dialout_failed_async():
+    """Runtime dialout failures fire here (busy / no-answer / mid-bridge)."""
+    transport, mocks = await _setup_run_bot(direction="outbound")
+    handler = transport._handlers["on_dialout_error"]
+    await handler(transport, {"errorCode": "no-answer", "sessionId": "s1"})
+
+    pt = mocks["pipeline_task"]
+    pt.cancel.assert_awaited_once_with(reason="dialout_failed_async")
+
+
+@pytest.mark.asyncio
+async def test_on_dialout_error_logs_data():
+    transport, _ = await _setup_run_bot(direction="outbound")
+    handler = transport._handlers["on_dialout_error"]
+    with patch("app.bot.bot.logger") as mock_logger:
+        await handler(transport, {"errorCode": "busy"})
+        error_calls = [c for c in mock_logger.error.call_args_list if c.args]
+        match = next(c for c in error_calls if c.args[0] == "dialout_failed_async")
+        assert match.kwargs["data"] == {"errorCode": "busy"}
+
+
+# CHANGE 3 — on_dialin_error → task.cancel("dialin_failed")
+
+
+@pytest.mark.asyncio
+async def test_on_dialin_error_cancels_with_dialin_failed():
+    transport, mocks = await _setup_run_bot()
+    handler = transport._handlers["on_dialin_error"]
+    await handler(transport, {"errorCode": "sip-timeout"})
+
+    pt = mocks["pipeline_task"]
+    pt.cancel.assert_awaited_once_with(reason="dialin_failed")
+
+
+@pytest.mark.asyncio
+async def test_on_dialin_error_logs_data():
+    transport, _ = await _setup_run_bot()
+    handler = transport._handlers["on_dialin_error"]
+    with patch("app.bot.bot.logger") as mock_logger:
+        await handler(transport, {"errorCode": "sip-timeout"})
+        error_calls = [c for c in mock_logger.error.call_args_list if c.args]
+        match = next(c for c in error_calls if c.args[0] == "dialin_failed")
+        assert match.kwargs["data"] == {"errorCode": "sip-timeout"}
+
+
+# CHANGE 4 — switched termination handlers
+
+
+@pytest.mark.asyncio
+async def test_on_dialin_stopped_calls_task_cancel():
+    transport, mocks = await _setup_run_bot()
+    handler = transport._handlers["on_dialin_stopped"]
+    await handler(transport, {"sessionId": "s"})
+
+    pt = mocks["pipeline_task"]
+    pt.cancel.assert_awaited_once_with(reason="dialin_stopped")
+    pt.queue_frames.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_on_dialout_stopped_calls_task_cancel():
+    transport, mocks = await _setup_run_bot(direction="outbound")
+    handler = transport._handlers["on_dialout_stopped"]
+    await handler(transport, {"sessionId": "s"})
+
+    pt = mocks["pipeline_task"]
+    pt.cancel.assert_awaited_once_with(reason="dialout_stopped")
+    pt.queue_frames.assert_not_called()
+
+
+# CHANGE 5 — on_client_disconnected (added alongside on_participant_left)
+
+
+@pytest.mark.asyncio
+async def test_on_client_disconnected_cancels_with_client_disconnected():
+    transport, mocks = await _setup_run_bot()
+    handler = transport._handlers["on_client_disconnected"]
+    await handler(transport, {"id": "p1"})
+
+    pt = mocks["pipeline_task"]
+    pt.cancel.assert_awaited_once_with(reason="client_disconnected")
+
+
+@pytest.mark.asyncio
+async def test_double_cancel_via_safe_cancel_preserves_first_reason():
+    """V-1: Daily's _on_participant_left dispatches BOTH
+    on_participant_left and on_client_disconnected for every leg.
+    safe_cancel must let only the first cancel through (preserves
+    the more-actionable reason) and short-circuit the rest.
+    """
+    transport, mocks = await _setup_run_bot()
+    on_pl = transport._handlers["on_participant_left"]
+    on_cd = transport._handlers["on_client_disconnected"]
+
+    # Sequence Daily fires: participant_left, then client_disconnected.
+    await on_pl(transport, {"id": "p1"}, "hangup")
+    await on_cd(transport, {"id": "p1"})
+
+    pt = mocks["pipeline_task"]
+    # Exactly ONE cancel call — and the FIRST reason wins.
+    assert pt.cancel.await_count == 1
+    pt.cancel.assert_awaited_with(reason="participant_left")
+
+
+@pytest.mark.asyncio
+async def test_safe_cancel_short_circuits_subsequent_terminators():
+    """Once cancel is invoked, on_dialout_stopped / on_dialin_stopped
+    arrivals later in the same race must NOT re-fire cancel.
+    """
+    transport, mocks = await _setup_run_bot(direction="outbound")
+    await transport._handlers["on_dialout_error"](transport, {"errorCode": "no-answer"})
+    await transport._handlers["on_dialout_stopped"](transport, {"sessionId": "s"})
+    await transport._handlers["on_participant_left"](transport, {"id": "p1"}, "left")
+
+    pt = mocks["pipeline_task"]
+    assert pt.cancel.await_count == 1
+    pt.cancel.assert_awaited_with(reason="dialout_failed_async")
+
+
+# CHANGE 6 — on_error logs only, NEVER cancels
+
+
+@pytest.mark.asyncio
+async def test_on_error_logs_but_does_not_cancel():
+    """Some transport errors are recoverable; let idle_timeout catch
+    terminal ones. on_error is observability-only.
+    """
+    transport, mocks = await _setup_run_bot()
+    handler = transport._handlers["on_error"]
+    await handler(transport, "ICE candidate exhaustion")
+
+    pt = mocks["pipeline_task"]
+    pt.cancel.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_on_error_logs_error_field():
+    transport, _ = await _setup_run_bot()
+    handler = transport._handlers["on_error"]
+    with patch("app.bot.bot.logger") as mock_logger:
+        await handler(transport, "websocket signalling failure")
+        error_calls = [c for c in mock_logger.error.call_args_list if c.args]
+        match = next(c for c in error_calls if c.args[0] == "transport_error")
+        assert match.kwargs["error"] == "websocket signalling failure"
+
+
+# CHANGE 7 — on_left logs only
+
+
+@pytest.mark.asyncio
+async def test_on_left_logs_transport_left():
+    transport, _ = await _setup_run_bot()
+    handler = transport._handlers["on_left"]
+    with patch("app.bot.bot.logger") as mock_logger:
+        await handler(transport)
+        info_calls = [c for c in mock_logger.info.call_args_list if c.args]
+        assert any(c.args[0] == "transport_left" for c in info_calls)
+
+
+@pytest.mark.asyncio
+async def test_on_left_does_not_cancel():
+    transport, mocks = await _setup_run_bot()
+    handler = transport._handlers["on_left"]
+    await handler(transport)
+
+    pt = mocks["pipeline_task"]
+    pt.cancel.assert_not_called()
+
+
+# Double-cancel safety on PipelineTask (V-3 confirmation under unit test)
+
+
+@pytest.mark.asyncio
+async def test_safe_cancel_calls_pipeline_task_cancel_exactly_once():
+    """Even if six different handlers fire safe_cancel during a hangup
+    race, PipelineTask.cancel() is called exactly once.
+    """
+    transport, mocks = await _setup_run_bot(direction="outbound")
+    sequence = [
+        ("on_dialout_error", (transport, {"errorCode": "x"})),
+        ("on_dialout_stopped", (transport, {"sessionId": "s"})),
+        ("on_dialin_stopped", (transport, {"sessionId": "s"})),
+        ("on_dialin_error", (transport, {"errorCode": "y"})),
+        ("on_participant_left", (transport, {"id": "p1"}, "left")),
+        ("on_client_disconnected", (transport, {"id": "p1"})),
+    ]
+    for name, args in sequence:
+        await transport._handlers[name](*args)
+
+    pt = mocks["pipeline_task"]
+    assert pt.cancel.await_count == 1
