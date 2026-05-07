@@ -1,31 +1,31 @@
-"""VERIFICATION-2 — function-call lifecycle integration test.
+"""VERIFICATION-2 — function-call lifecycle integration tests.
 
-Empirically confirms that, after the Bug A rewrite (no
-``InterruptionTaskFrame`` from inside tool handlers), the standard
-Pipecat function-call lifecycle correctly lands BOTH a ``tool_use``
-block (on the assistant turn) AND a ``tool_result`` block (on the
-following user turn) in the LLM context. The Bedrock adapter then
-converts those into ``toolUse`` / ``toolResult`` content blocks
-that Claude can reason over.
+Empirically confirms (via Pipecat's official ``pipecat.tests.utils.
+run_test`` harness) that the standard function-call frame sequence
+results in BOTH a ``tool_use`` block (assistant turn) AND a
+``tool_result`` block (user turn) landing in the LLM context. The
+Bedrock adapter then converts those into ``toolUse`` / ``toolResult``
+content blocks Claude can reason over.
 
-This is the specific bug yesterday's inbound PSTN test surfaced:
-because press_digit pushed an interruption frame from inside the
-handler, neither the tool_use nor the tool_result ever made it
-into context. Claude saw repeated user requests but no record of
-having pressed digits → infinite tool-call loop.
+This is the specific regression yesterday's inbound PSTN test
+surfaced: because press_digit pushed an ``InterruptionTaskFrame``
+from inside the handler, neither the tool_use nor the tool_result
+ever made it into context. Claude saw repeated user requests but
+no record of having pressed digits → infinite tool-call loop. The
+press_digit rewrite removed the interruption hack; these tests are
+the empirical guard that the lifecycle now works end-to-end.
 
-Test approach: drive ``LLMAssistantAggregator`` directly with the
-canonical frame sequence from ``llm_service.py`` (FunctionCallIn-
-ProgressFrame → FunctionCallResultFrame). Inspect ``LLMContext``
-messages afterward. Then run those messages through the Bedrock
-adapter and inspect the resulting toolUse / toolResult content
-blocks.
+Why ``run_test`` (and not direct method invocation)? The bug was a
+frame-flow problem — the ``FunctionCallInProgressFrame`` and
+``FunctionCallResultFrame`` (both ``UninterruptibleFrame``) failed
+to reach the assistant aggregator because of an in-flight
+``InterruptionFrame`` racing them. A test that directly calls
+``_handle_function_call_in_progress`` would pass even if the
+underlying frame-flow path were still broken. ``run_test`` exercises
+the real Pipeline → Source → Processor → Sink path, so it would
+have caught the bug before it shipped.
 
-Defaults under test:
-* ``cancel_on_interruption=True`` (Pipecat default; sync flow). With
-  the Bug A rewrite, both press_digit and end_call use this default.
-* ``run_llm`` is whatever the result-callback ``properties`` say —
-  defaults to ``True``.
+Reference: https://reference-server.pipecat.ai/en/stable/api/pipecat.tests.utils.html
 """
 
 from __future__ import annotations
@@ -38,128 +38,128 @@ from pipecat.frames.frames import (
     FunctionCallInProgressFrame,
     FunctionCallResultFrame,
     FunctionCallResultProperties,
+    LLMContextFrame,
 )
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMAssistantAggregator,
 )
+from pipecat.tests.utils import run_test
 
 
-def _make_aggregator() -> tuple[LLMAssistantAggregator, LLMContext]:
-    context = LLMContext()
-    aggregator = LLMAssistantAggregator(context=context)
-    return aggregator, context
-
-
-@pytest.mark.asyncio
-async def test_sync_tool_lifecycle_records_tool_use_and_tool_result_in_context():
-    """The synchronous tool path (``cancel_on_interruption=True``)
-    adds an assistant ``tool_calls`` message AND a ``tool`` message
-    with the actual result. Both must be present so Bedrock's adapter
-    can emit ``toolUse`` and ``toolResult`` content blocks.
-    """
-    aggregator, context = _make_aggregator()
-
-    # In-progress frame — broadcast by the LLM service before invoking
-    # the handler. Adds the assistant tool_calls block + IN_PROGRESS
-    # tool message.
-    in_progress = FunctionCallInProgressFrame(
+def _in_progress(tool_call_id: str = "tc_lifecycle_1") -> FunctionCallInProgressFrame:
+    return FunctionCallInProgressFrame(
         function_name="press_digit",
-        tool_call_id="tooluse_abc123",
+        tool_call_id=tool_call_id,
         arguments={"digits": "123"},
         cancel_on_interruption=True,
     )
-    await aggregator._handle_function_call_in_progress(in_progress)
 
-    # Result frame — broadcast by the result_callback after the
-    # handler completes. For sync flow, the IN_PROGRESS placeholder
-    # is updated in place with the actual result.
-    result_frame = FunctionCallResultFrame(
+
+def _result(tool_call_id: str = "tc_lifecycle_1") -> FunctionCallResultFrame:
+    return FunctionCallResultFrame(
         function_name="press_digit",
-        tool_call_id="tooluse_abc123",
+        tool_call_id=tool_call_id,
         arguments={"digits": "123"},
         result={"digits_pressed": "123", "digit_count": 3},
         run_llm=True,
         properties=FunctionCallResultProperties(),
     )
-    # Mirror the LLM service's _function_calls_in_progress dict that
-    # _handle_function_call_result expects to find the in-progress
-    # entry in. The aggregator's _handle_function_call_in_progress
-    # populates it; verify and proceed.
-    assert "tooluse_abc123" in aggregator._function_calls_in_progress
-    await aggregator._handle_function_call_result(result_frame)
 
-    # Inspect context.
+
+@pytest.mark.asyncio
+async def test_lifecycle_via_run_test_records_tool_use_and_tool_result_in_context():
+    """The canonical FunctionCallInProgress → FunctionCallResult sequence,
+    sent through Pipecat's ``run_test`` harness, results in:
+
+    * an ``assistant`` message with a ``tool_calls`` list naming the
+      tool, AND
+    * a ``tool``-role message with the actual result payload (no
+      stale ``IN_PROGRESS`` marker).
+
+    Both must be present so the Bedrock adapter can emit the proper
+    ``toolUse`` and ``toolResult`` content blocks Claude needs to
+    keep memory of what it called.
+    """
+    context = LLMContext()
+    aggregator = LLMAssistantAggregator(context=context)
+
+    await run_test(
+        aggregator,
+        frames_to_send=[_in_progress(), _result()],
+    )
+
     messages = context.get_messages()
 
-    # An assistant message with a tool_calls list naming press_digit.
-    assistant_with_tool_calls = [
+    asst_with_tool_calls = [
         m for m in messages if m.get("role") == "assistant" and m.get("tool_calls")
     ]
-    assert len(assistant_with_tool_calls) == 1, messages
-    tc = assistant_with_tool_calls[0]["tool_calls"][0]
-    assert tc["id"] == "tooluse_abc123"
+    assert len(asst_with_tool_calls) == 1, messages
+    tc = asst_with_tool_calls[0]["tool_calls"][0]
+    assert tc["id"] == "tc_lifecycle_1"
     assert tc["function"]["name"] == "press_digit"
 
-    # A tool message keyed by the same tool_call_id, content is the
-    # serialized result payload (no longer "IN_PROGRESS").
-    tool_messages = [
-        m for m in messages if m.get("role") == "tool" and m.get("tool_call_id") == "tooluse_abc123"
+    tool_msgs = [
+        m for m in messages if m.get("role") == "tool" and m.get("tool_call_id") == "tc_lifecycle_1"
     ]
-    assert len(tool_messages) == 1, messages
-    assert tool_messages[0]["content"] != "IN_PROGRESS", (
-        "tool message must be updated with the actual result"
+    assert len(tool_msgs) == 1, messages
+    assert tool_msgs[0]["content"] != "IN_PROGRESS", (
+        "tool message must be updated with the actual result; got the stale "
+        "IN_PROGRESS placeholder, which means _handle_function_call_finished "
+        "didn't run — the Bug A symptom returning."
     )
-    # JSON-encoded payload.
-    payload = json.loads(tool_messages[0]["content"])
+    payload = json.loads(tool_msgs[0]["content"])
     assert payload["digits_pressed"] == "123"
 
 
 @pytest.mark.asyncio
-async def test_bedrock_adapter_emits_tool_use_and_tool_result_blocks():
-    """Run the standard-format messages from the lifecycle through
-    the Bedrock adapter. Bedrock's Converse API needs:
-
-    * ``role: assistant`` with ``content: [{toolUse: {...}}]``
-    * ``role: user`` with ``content: [{toolResult: {...}}]``
-
-    Anything else (e.g. dropping the toolUse block, or losing the
-    toolResult into a generic text blob) will cause Claude to lose
-    memory of the tool call — which is the exact symptom yesterday's
-    inbound PSTN test surfaced.
+async def test_lifecycle_via_run_test_pushes_context_frame_upstream_when_run_llm_true():
+    """When the FunctionCallResultFrame has ``run_llm=True``, the
+    aggregator pushes an ``LLMContextFrame`` upstream so the LLM
+    service re-fires with the updated context. ``run_test``'s
+    upstream capture proves the frame flows correctly — without it,
+    Claude wouldn't get a chance to confirm the tool result.
     """
-    aggregator, context = _make_aggregator()
+    context = LLMContext()
+    aggregator = LLMAssistantAggregator(context=context)
 
-    # Seed the context with a prior user turn to anchor the conversation.
+    _, up_frames = await run_test(
+        aggregator,
+        frames_to_send=[_in_progress("tc_run_llm"), _result("tc_run_llm")],
+    )
+
+    context_frames = [f for f in up_frames if isinstance(f, LLMContextFrame)]
+    assert context_frames, (
+        f"no LLMContextFrame upstream — re-inference path is broken. "
+        f"Got upstream frames: {[type(f).__name__ for f in up_frames]}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_bedrock_adapter_emits_tool_use_and_tool_result_blocks_via_run_test():
+    """End-to-end: drive the full lifecycle via ``run_test``, then
+    convert the resulting LLMContext through ``AWSBedrockLLMAdapter``
+    and assert the Bedrock-format messages contain:
+
+    * a ``toolUse`` content block on an ``assistant`` turn
+    * a ``toolResult`` content block on a ``user`` turn
+
+    This is the production-shape proof — what Claude actually sees
+    on its next inference call.
+    """
+    context = LLMContext()
+    aggregator = LLMAssistantAggregator(context=context)
     context.add_message({"role": "user", "content": "Press 1 2 3 please."})
 
-    # Drive the lifecycle.
-    await aggregator._handle_function_call_in_progress(
-        FunctionCallInProgressFrame(
-            function_name="press_digit",
-            tool_call_id="tooluse_xyz789",
-            arguments={"digits": "123"},
-            cancel_on_interruption=True,
-        )
-    )
-    await aggregator._handle_function_call_result(
-        FunctionCallResultFrame(
-            function_name="press_digit",
-            tool_call_id="tooluse_xyz789",
-            arguments={"digits": "123"},
-            result={"digits_pressed": "123", "digit_count": 3},
-            run_llm=True,
-            properties=FunctionCallResultProperties(),
-        )
+    await run_test(
+        aggregator,
+        frames_to_send=[_in_progress("tc_bedrock"), _result("tc_bedrock")],
     )
 
-    # Convert through the Bedrock adapter.
     adapter = AWSBedrockLLMAdapter()
     invocation = adapter.get_llm_invocation_params(context)
     bedrock_messages = invocation["messages"]
 
-    # Find a toolUse content block (assistant turn) and a toolResult
-    # content block (user turn, post-merge per Bedrock convention).
     tool_use_blocks: list = []
     tool_result_blocks: list = []
     for msg in bedrock_messages:
@@ -167,74 +167,29 @@ async def test_bedrock_adapter_emits_tool_use_and_tool_result_blocks():
         if not isinstance(content, list):
             continue
         for block in content:
-            if isinstance(block, dict) and "toolUse" in block:
+            if not isinstance(block, dict):
+                continue
+            if "toolUse" in block:
                 tool_use_blocks.append((msg["role"], block["toolUse"]))
-            if isinstance(block, dict) and "toolResult" in block:
+            if "toolResult" in block:
                 tool_result_blocks.append((msg["role"], block["toolResult"]))
 
-    assert tool_use_blocks, f"no toolUse block in bedrock messages: {bedrock_messages}"
-    assert tool_result_blocks, f"no toolResult block in bedrock messages: {bedrock_messages}"
+    assert tool_use_blocks, (
+        f"no toolUse content block in Bedrock messages; this is the "
+        f"Bug A regression. Bedrock messages: {bedrock_messages}"
+    )
+    assert tool_result_blocks, (
+        f"no toolResult content block in Bedrock messages; this is the "
+        f"Bug A regression. Bedrock messages: {bedrock_messages}"
+    )
 
-    # toolUse must live on an assistant turn.
     role, tu = tool_use_blocks[0]
-    assert role == "assistant"
-    assert tu["toolUseId"] == "tooluse_xyz789"
+    assert role == "assistant", f"toolUse landed on wrong role: {role}"
+    assert tu["toolUseId"] == "tc_bedrock"
     assert tu["name"] == "press_digit"
     assert tu["input"] == {"digits": "123"}
 
-    # toolResult must live on a user turn (Bedrock convention; the
-    # adapter converts ``role: tool`` → ``role: user`` with the
-    # toolResult content block).
     role, tr = tool_result_blocks[0]
-    assert role == "user"
-    assert tr["toolUseId"] == "tooluse_xyz789"
-    # Result content carries the success payload.
+    assert role == "user", f"toolResult landed on wrong role: {role}"
+    assert tr["toolUseId"] == "tc_bedrock"
     assert tr["content"], f"toolResult content empty: {tr}"
-
-
-@pytest.mark.asyncio
-async def test_lifecycle_works_without_interruption_frame():
-    """Direct empirical re-verification of the Bug A claim.
-
-    The press_digit handler used to push an ``InterruptionTaskFrame``
-    BEFORE returning. That frame propagated through the pipeline as
-    a downstream ``InterruptionFrame`` and triggered the assistant
-    aggregator's ``reset()`` path, which discarded the partial
-    aggregation.
-
-    With the rewrite, the handler does no such thing. To confirm the
-    lifecycle is healthy under the new pattern, drive the canonical
-    sequence and verify the assistant tool_calls + tool messages
-    are intact afterward.
-    """
-    aggregator, context = _make_aggregator()
-
-    await aggregator._handle_function_call_in_progress(
-        FunctionCallInProgressFrame(
-            function_name="press_digit",
-            tool_call_id="tooluse_no_interrupt",
-            arguments={"digits": "9"},
-            cancel_on_interruption=True,
-        )
-    )
-    await aggregator._handle_function_call_result(
-        FunctionCallResultFrame(
-            function_name="press_digit",
-            tool_call_id="tooluse_no_interrupt",
-            arguments={"digits": "9"},
-            result={"digits_pressed": "9"},
-            run_llm=True,
-            properties=FunctionCallResultProperties(),
-        )
-    )
-
-    messages = context.get_messages()
-    assert any(m.get("role") == "assistant" and m.get("tool_calls") for m in messages), (
-        "assistant tool_calls block missing — Bug A regression?"
-    )
-    assert any(
-        m.get("role") == "tool"
-        and m.get("tool_call_id") == "tooluse_no_interrupt"
-        and m.get("content") != "IN_PROGRESS"
-        for m in messages
-    ), "tool result message missing — Bug A regression?"
