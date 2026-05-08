@@ -517,3 +517,86 @@ caught + fixed).
 level signal handler.
 
 </details>
+
+## Entry 13: AssemblyAI WebSocket 1008 under burst load is documented vendor behavior, not a defect
+
+**Context.** Layer 9.5 scale test surfaced ~80 log lines of
+AssemblyAI WebSocket close 1008 (policy violation) when N=6
+concurrent ``/start`` requests were fired in <1 second by the
+synthetic load harness (``backend/voice-agent/scripts/scale_test.py``).
+At first glance this looked like a vendor blocker — calls were
+accepted by the engine but the AssemblyAI side closed the WS
+mid-handshake.
+
+**Root cause.** AssemblyAI Universal-Streaming v3 has *unlimited*
+concurrent streams; what is rate-limited is *new streams per
+minute*. The default baseline is 100 new streams/min, with
+auto-scaling that grows the baseline by 10 % every 60 s once
+utilization passes 70 %. Our harness opens N WebSockets in
+milliseconds, so a 6-stream burst is treated as 6 toward the
+per-minute new-stream cap and can briefly exceed the baseline
+before auto-scaling reacts. Production traffic does not look
+like this — real PSTN calls arrive paced over wall-clock time,
+not in synthetic millisecond bursts.
+
+**Why we accepted this (no code change).** The behavior is
+documented vendor policy, not a defect in v2. Mitigation lives at
+the account-configuration layer (raise the baseline before
+production launch, sized to expected peak), not in the engine.
+Adding artificial pacing to ``/start`` to "smooth" the harness
+would mask the signal we *want* the harness to expose: that
+vendor onboarding (paid tier, baseline raise, BAA) is its own
+launch-readiness workstream.
+
+**Verification.**
+
+- AssemblyAI docs explicit on the model:
+  ``https://www.assemblyai.com/docs/concepts/concurrency-limit``.
+  "If you briefly exceed your current limit, new connections may
+  return 1008 until it scales; baselines can be raised on
+  request."
+- Endpoint version verified as v3 Universal-Streaming, not legacy
+  v2-realtime, via three independent checks:
+  (1) Pipecat default
+  ``api_endpoint_base_url="wss://streaming.assemblyai.com/v3/ws"``
+  in ``.venv/.../pipecat/services/assemblyai/stt.py``;
+  (2) ``backend/voice-agent/app/services/factory.py`` does not
+  pass ``api_endpoint_base_url=`` and therefore accepts the
+  default; (3) Pipecat's service refuses to start with
+  ``vad_force_turn_endpoint=False`` on any non-Universal-3-Pro
+  model — our Mode-2 + ``u3-rt-pro`` combination only resolves on
+  the v3 endpoint, so a silent regression to v2-realtime is
+  structurally impossible without a code change here.
+
+**Effective wire URL on every call:**
+``wss://streaming.assemblyai.com/v3/ws?sample_rate=8000&encoding=pcm_s16le&speech_model=u3-rt-pro&vad_threshold=0.3``.
+
+**Cost.** Zero in v2 code. Cost is in vendor onboarding
+(account tier verification, baseline raise request, BAA
+follow-up), tracked below.
+
+**Exit condition — production-readiness checklist.**
+
+- [ ] Cosentus AssemblyAI account confirmed paid tier (billing
+  dashboard).
+- [ ] Baseline new-streams/min raised to ~2× expected peak new
+  calls/min for headroom (email AssemblyAI Sales).
+- [ ] BAA status confirmed with a human AssemblyAI rep (still
+  open since the AI-sales-agent reply was non-authoritative).
+- [x] v3 Universal-Streaming endpoint confirmed (2026-05-08,
+  during Layer 10 VERIFICATION-0).
+
+Close this entry once all three vendor-side items land and the
+Layer 9.5 burst-test note is reframed in the scale-test report
+from "vendor unknown" to "expected vendor behavior, mitigated by
+baseline raise."
+
+**Status.** Open, non-blocking for Layer 10 / Layer 11.
+
+**Severity.** Low — vendor configuration, not code. Production
+traffic patterns will not reproduce the harness burst pattern
+that triggered the 1008s.
+
+**Layer / file.** Vendor / account-side. No v2 code owns this;
+referenced by the Layer 9.5 scale-test report and (future)
+``docs/runbooks/production-launch-checklist.md``.
