@@ -1,0 +1,365 @@
+import * as cdk from 'aws-cdk-lib';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import * as ecr from 'aws-cdk-lib/aws-ecr';
+import * as ecs from 'aws-cdk-lib/aws-ecs';
+import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import * as logs from 'aws-cdk-lib/aws-logs';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import { Construct } from 'constructs';
+import { VoiceEngineConfig, resourcePrefix } from '../config';
+
+export interface EcsServiceSecretArns {
+  readonly apiKey: string;
+  readonly dailyApiKey: string;
+  readonly assemblyAi: string;
+  readonly elevenLabs: string;
+}
+
+export interface EcsServiceConstructProps {
+  readonly config: VoiceEngineConfig;
+  readonly vpc: ec2.IVpc;
+  readonly taskSecurityGroup: ec2.ISecurityGroup;
+  readonly privateSubnets: ec2.ISubnet[];
+  /** ECR image tag to deploy. Read from `-c imageTag=...` context. */
+  readonly imageTag: string;
+  /** ECR repository hosting the image. */
+  readonly repository: ecr.IRepository;
+  readonly secretArns: EcsServiceSecretArns;
+  readonly recordingsBucketArn: string;
+  /** May be empty for prod until `.env.prod` is populated. */
+  readonly recordingsKmsKeyArn: string;
+  readonly targetGroup: elbv2.ApplicationTargetGroup;
+}
+
+/**
+ * ECS Fargate cluster, task definition, service, and autoscaling.
+ *
+ * Why one construct (not three)
+ * -----------------------------
+ * Cluster / task definition / service / autoscaling are tightly coupled
+ * — moving any one of them touches the others' permissions and naming.
+ * Keeping them in one Construct lets the caller (ComputeStack) treat
+ * "the engine fleet" as one logical unit and keeps the per-env divergence
+ * (cooldowns, min/max capacity) local to one file.
+ *
+ * Task sizing — locked-in from Layer 9.5
+ * --------------------------------------
+ *   - 1 vCPU (1024 units), 2 GB memory (2048 MiB). Measured peak in
+ *     scale test: 510 MB RSS, 66% CPU, file descriptors flat at ~215.
+ *     2× headroom on memory for safety.
+ *   - stopTimeout 120 s. Layer 9 graceful-drain budget is 90 s with
+ *     30 s of slack for stragglers.
+ *   - x86_64 / linux. The Dockerfile builds for amd64 explicitly.
+ *
+ * Auto-scaling — target tracking on `ActiveSessions`
+ * --------------------------------------------------
+ *   - Target metric: `Cosentus/VoiceEngine/ActiveSessions` (custom),
+ *     statistic Average, period 60s. Emitted per-task by the engine
+ *     (Wave 4 follow-up). Until that emitter ships the metric is
+ *     undefined and autoscaling stays at min — safe.
+ *   - Target value: 70% of session capacity = floor(6 × 0.7) = 4.2.
+ *     CDK accepts the fractional target; CloudWatch compares against it
+ *     directly.
+ *   - Scale-out cooldown 60s — capacity ramps fast under burst.
+ *   - Scale-in cooldown 300s — slow drain prevents yo-yo on lulls.
+ *
+ * Deployment behaviour
+ * --------------------
+ *   - Rolling deploy with `minHealthyPercent=100, maxHealthyPercent=200`.
+ *     Zero-downtime: a new task starts before any old task drains. With
+ *     `desiredCount=1` (staging/prod start), the deploy temporarily
+ *     runs 2 tasks then drains the old one.
+ *   - Circuit breaker enabled with rollback. A failed deploy auto-rolls
+ *     back rather than leaving the service in DRAINING limbo.
+ *   - Health-check grace 30s — covers container cold-start (~10–15s
+ *     observed locally with QEMU; native Fargate amd64 is faster).
+ *   - ECS Exec enabled (`enableExecuteCommand: true`) for live debug.
+ *     CDK auto-adds the ssmmessages IAM grants.
+ *
+ * IAM — least privilege per Layer 11 brief
+ * ----------------------------------------
+ *   - Execution role: ECR pull, CW Logs write, Secrets Manager
+ *     GetSecretValue (for env-var injection of the 4 API keys).
+ *   - Task role: bedrock invoke + invoke-stream, scoped Secrets Manager
+ *     re-read (runtime SDK use), s3:PutObject on the recordings bucket,
+ *     KMS encrypt/decrypt/generate-data-key on the recordings KMS key,
+ *     lambda:InvokeFunction on `cosentus-voice-api-*`,
+ *     cloudwatch:PutMetricData restricted to the
+ *     `Cosentus/VoiceEngine` namespace, and ecs:UpdateTaskProtection
+ *     scoped to this cluster's task ARNs.
+ */
+export class EcsServiceConstruct extends Construct {
+  public readonly cluster: ecs.Cluster;
+  public readonly taskDefinition: ecs.FargateTaskDefinition;
+  public readonly service: ecs.FargateService;
+  public readonly executionRole: iam.Role;
+  public readonly taskRole: iam.Role;
+  public readonly logGroup: logs.LogGroup;
+
+  constructor(scope: Construct, id: string, props: EcsServiceConstructProps) {
+    super(scope, id);
+    const {
+      config,
+      vpc,
+      taskSecurityGroup,
+      privateSubnets,
+      imageTag,
+      repository,
+      secretArns,
+      recordingsBucketArn,
+      recordingsKmsKeyArn,
+      targetGroup,
+    } = props;
+
+    const stack = cdk.Stack.of(this);
+    const prefix = resourcePrefix(config);
+
+    this.cluster = new ecs.Cluster(this, 'Cluster', {
+      clusterName: `${prefix}-cluster`,
+      vpc,
+      containerInsightsV2: ecs.ContainerInsights.ENABLED,
+    });
+
+    this.logGroup = new logs.LogGroup(this, 'EngineLogGroup', {
+      logGroupName: `/aws/ecs/${prefix}`,
+      retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    this.executionRole = this.buildExecutionRole(prefix, secretArns);
+    this.taskRole = this.buildTaskRole(
+      prefix,
+      stack,
+      secretArns,
+      recordingsBucketArn,
+      recordingsKmsKeyArn,
+    );
+
+    this.taskDefinition = new ecs.FargateTaskDefinition(this, 'TaskDefinition', {
+      family: prefix,
+      cpu: config.cpu,
+      memoryLimitMiB: config.memoryMiB,
+      executionRole: this.executionRole,
+      taskRole: this.taskRole,
+      runtimePlatform: {
+        cpuArchitecture: ecs.CpuArchitecture.X86_64,
+        operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
+      },
+    });
+
+    const apiKeySecret = secretsmanager.Secret.fromSecretCompleteArn(
+      this,
+      'ApiKeySecretRef',
+      secretArns.apiKey,
+    );
+    const dailySecret = secretsmanager.Secret.fromSecretCompleteArn(
+      this,
+      'DailyApiKeySecretRef',
+      secretArns.dailyApiKey,
+    );
+    const aaiSecret = secretsmanager.Secret.fromSecretCompleteArn(
+      this,
+      'AssemblyAiSecretRef',
+      secretArns.assemblyAi,
+    );
+    const elevenSecret = secretsmanager.Secret.fromSecretCompleteArn(
+      this,
+      'ElevenLabsSecretRef',
+      secretArns.elevenLabs,
+    );
+
+    this.taskDefinition.addContainer('Engine', {
+      containerName: 'engine',
+      image: ecs.ContainerImage.fromEcrRepository(repository, imageTag),
+      essential: true,
+      logging: ecs.LogDrivers.awsLogs({
+        streamPrefix: 'engine',
+        logGroup: this.logGroup,
+      }),
+      portMappings: [
+        {
+          containerPort: 8080,
+          protocol: ecs.Protocol.TCP,
+        },
+      ],
+      stopTimeout: cdk.Duration.seconds(config.stopTimeoutSeconds),
+      environment: {
+        SERVICE_PORT: '8080',
+        ENVIRONMENT: config.environment,
+        AWS_REGION: config.region,
+        MAX_CONCURRENT_CALLS: String(config.sessionCapacityPerTask),
+        RECORDINGS_BUCKET_NAME: stack.splitArn(
+          recordingsBucketArn,
+          cdk.ArnFormat.NO_RESOURCE_NAME,
+        ).resource,
+      },
+      secrets: {
+        API_KEY: ecs.Secret.fromSecretsManager(apiKeySecret),
+        DAILY_API_KEY: ecs.Secret.fromSecretsManager(dailySecret),
+        ASSEMBLYAI_API_KEY: ecs.Secret.fromSecretsManager(aaiSecret),
+        ELEVENLABS_API_KEY: ecs.Secret.fromSecretsManager(elevenSecret),
+      },
+    });
+
+    this.service = new ecs.FargateService(this, 'Service', {
+      serviceName: `${prefix}-service`,
+      cluster: this.cluster,
+      taskDefinition: this.taskDefinition,
+      desiredCount: config.minCapacity,
+      assignPublicIp: false,
+      vpcSubnets: { subnets: privateSubnets },
+      securityGroups: [taskSecurityGroup],
+      healthCheckGracePeriod: cdk.Duration.seconds(30),
+      minHealthyPercent: 100,
+      maxHealthyPercent: 200,
+      enableExecuteCommand: true,
+      circuitBreaker: { rollback: true },
+      propagateTags: ecs.PropagatedTagSource.SERVICE,
+    });
+
+    this.service.attachToApplicationTargetGroup(targetGroup);
+
+    const scalableTarget = this.service.autoScaleTaskCount({
+      minCapacity: config.minCapacity,
+      maxCapacity: config.maxCapacity,
+    });
+
+    const targetValue =
+      (config.sessionCapacityPerTask * config.targetSessionsPct) / 100;
+
+    scalableTarget.scaleToTrackCustomMetric('ActiveSessionsTracking', {
+      metric: new cloudwatch.Metric({
+        namespace: 'Cosentus/VoiceEngine',
+        metricName: 'ActiveSessions',
+        dimensionsMap: {
+          Environment: config.environment,
+          ClusterName: this.cluster.clusterName,
+          ServiceName: `${prefix}-service`,
+        },
+        statistic: 'Average',
+        period: cdk.Duration.minutes(1),
+      }),
+      targetValue,
+      scaleOutCooldown: cdk.Duration.seconds(config.scaleOutCooldownSeconds),
+      scaleInCooldown: cdk.Duration.seconds(config.scaleInCooldownSeconds),
+    });
+  }
+
+  private buildExecutionRole(prefix: string, secretArns: EcsServiceSecretArns): iam.Role {
+    const role = new iam.Role(this, 'ExecutionRole', {
+      roleName: `${prefix}-execution-role`,
+      assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+      description: 'Pulls images, ships logs, injects secrets into the engine task at startup.',
+    });
+    role.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AmazonECSTaskExecutionRolePolicy'),
+    );
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: Object.values(secretArns),
+      }),
+    );
+    return role;
+  }
+
+  private buildTaskRole(
+    prefix: string,
+    stack: cdk.Stack,
+    secretArns: EcsServiceSecretArns,
+    recordingsBucketArn: string,
+    recordingsKmsKeyArn: string,
+  ): iam.Role {
+    const role = new iam.Role(this, 'TaskRole', {
+      roleName: `${prefix}-task-role`,
+      assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+      description: 'Engine application permissions: Bedrock, secrets, recordings, lambda, metrics, task protection.',
+    });
+
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'BedrockInvoke',
+        actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
+        resources: ['*'],
+      }),
+    );
+
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'SecretsManagerRuntime',
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: Object.values(secretArns),
+      }),
+    );
+
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'RecordingsBucketWrite',
+        actions: ['s3:PutObject', 's3:PutObjectAcl', 's3:GetObject'],
+        resources: [`${recordingsBucketArn}/*`],
+      }),
+    );
+
+    if (recordingsKmsKeyArn) {
+      role.addToPolicy(
+        new iam.PolicyStatement({
+          sid: 'RecordingsKmsEncryptDecrypt',
+          actions: [
+            'kms:Encrypt',
+            'kms:Decrypt',
+            'kms:GenerateDataKey',
+            'kms:DescribeKey',
+          ],
+          resources: [recordingsKmsKeyArn],
+        }),
+      );
+    }
+
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'VoiceApiLambdaInvoke',
+        actions: ['lambda:InvokeFunction'],
+        resources: [
+          stack.formatArn({
+            service: 'lambda',
+            resource: 'function',
+            resourceName: 'cosentus-voice-api-*',
+            arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
+          }),
+        ],
+      }),
+    );
+
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'CloudWatchMetricsScoped',
+        actions: ['cloudwatch:PutMetricData'],
+        resources: ['*'],
+        conditions: {
+          StringEquals: {
+            'cloudwatch:namespace': 'Cosentus/VoiceEngine',
+          },
+        },
+      }),
+    );
+
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'EcsTaskProtection',
+        actions: ['ecs:UpdateTaskProtection', 'ecs:GetTaskProtection'],
+        resources: [
+          stack.formatArn({
+            service: 'ecs',
+            resource: 'task',
+            resourceName: `${prefix}-cluster/*`,
+            arnFormat: cdk.ArnFormat.SLASH_RESOURCE_NAME,
+          }),
+        ],
+      }),
+    );
+
+    return role;
+  }
+}

@@ -6,13 +6,13 @@ independently from one codebase.
 
 ## Status
 
-Wave 2 of 5 — `StorageStack` (Secrets Manager + recordings bucket).
+Wave 3 of 5 — `CertStack` + `ComputeStack` (ALB + ECS + autoscaling + monitoring).
 
 | Wave | Scope | Status |
 |------|-------|--------|
 | 1 | Skeleton + ECR + VPC + network | shipped |
 | 2 | `StorageStack` (Secrets Manager + S3 recordings + KMS) | shipped |
-| 3 | `CertStack` (wildcard ACM) + `ComputeStack` (ALB + ECS + autoscaling) | pending |
+| 3 | `CertStack` (wildcard ACM) + `ComputeStack` (ALB + ECS + autoscaling + monitoring) | shipped |
 | 4 | Engine-side `cloudwatch:PutMetricData` for `ActiveSessions` | pending |
 | 5 | GitHub Actions (`build-and-push`, `deploy-staging`, `deploy-prod`) + doc cleanup | pending |
 
@@ -43,10 +43,15 @@ infrastructure/
       ecr-stack.ts               # dedicated ECR repo (env-independent)
       network-stack.ts           # VPC, subnets, security groups, endpoints
       storage-stack.ts           # Secrets Manager + recordings bucket
+      cert-stack.ts              # shared wildcard ACM (env-independent)
+      compute-stack.ts           # ALB + ECS + autoscaling + monitoring
     constructs/
       vpc.ts                     # VPC + 8 endpoints + 2 security groups
       secrets.ts                 # 4 empty Secrets Manager entries (L1 CfnSecret)
       recordings-bucket.ts       # S3 + KMS (create) or import per env
+      alb.ts                     # internet-facing ALB + HTTPS listener + target group
+      ecs-service.ts             # cluster + task def + Fargate service + autoscaling
+      monitoring.ts              # SNS alarm topic + 5 alarms + dashboard
 ```
 
 ## Locked-in choices
@@ -57,11 +62,13 @@ infrastructure/
 | Region | `us-east-1` | Bedrock inference profiles + Daily PSTN trunk |
 | Task sizing | 1 vCPU / 2 GB / `stopTimeout=120s` | Layer 9.5 scale test |
 | Max concurrent calls / task | 6 | Layer 9.5 + Bug D capacity gate |
-| ALB scheme | internet-facing, HTTPS only | Daily webhook lands publicly |
+| ALB scheme | internet-facing, HTTPS only, TLS 1.2+ | Daily webhook lands publicly |
 | ACM strategy | one shared wildcard `*.cosentusaibackend.com`, DNS-validated | minimizes GoDaddy DNS work |
 | ECR | dedicated repo `cosentus-voice-engine`, immutable tags | CI/CD push path, not CDK asset |
 | NAT Gateways | staging=1, prod=3 | cost vs HA per env |
 | VPC CIDRs | staging `10.20.0.0/16`, prod `10.30.0.0/16` | non-overlapping with v1's `vpc-05a1f6c68c04943ec` |
+| Autoscaling | target tracking on `ActiveSessions`, target=4.2/task (70% of 6), out=60s, in=300s | brief + validate-then-commit prod sizing |
+| Capacity | staging min=1/max=5, prod min=1/max=25 | start small, raise after Wave 6 mock load |
 
 ## DNS / TLS path
 
@@ -92,6 +99,32 @@ This avoids migrating the apex (and its existing records like
 
 `config.ts` carries the same defaults so deploying without a `.env`
 file still produces correct synthesized CloudFormation.
+
+## Deploy order (Wave 3+)
+
+ComputeStack reads its inputs via SSM dynamic refs (`{{resolve:ssm:/...}}`),
+so synth always succeeds from scratch — but deploys fail loudly until
+the upstream stacks have published their SSM values. The required
+sequence per environment:
+
+```
+1. cdk deploy cosentus-voice-engine-cert            # one-time, env-independent
+                                                    # then: add CNAME at GoDaddy,
+                                                    # wait for ACM validation
+2. cdk deploy cosentus-voice-engine-<env>-ecr       # creates the ECR repo
+3. (push the engine image, tag it, get a sha)       # CI/CD or manual
+4. cdk deploy cosentus-voice-engine-<env>-network   # VPC, NAT, endpoints
+5. cdk deploy cosentus-voice-engine-<env>-storage   # secrets (empty) + bucket
+6. (populate secrets via AWS Console, see below)    # API keys go in plaintext
+7. cdk deploy cosentus-voice-engine-<env>-compute   # ALB + ECS + autoscaling
+                                                    # then: add CNAME at GoDaddy
+                                                    # pointing serviceHostname →
+                                                    # ALB DNS output
+```
+
+After step 7, subscribe operator endpoints (email / PagerDuty / Slack
+incoming-webhook bridge) to the SNS topic published as
+`AlarmTopicArn` in ComputeStack's outputs.
 
 ## Secrets Manager — populating before deploy
 

@@ -18,6 +18,15 @@
 
 import { VoiceEngineConfig } from './config';
 
+/**
+ * Shared (env-independent) SSM parameter paths.
+ *
+ * The wildcard ACM cert covers both staging and prod hostnames, so its
+ * ARN lives at a fixed path that both ComputeStacks read. CertStack is
+ * deployed once (env-independent stack name) and writes the ARN here.
+ */
+export const SHARED_CERT_ARN_PARAM = '/cosentus-voice-engine/shared/cert/arn';
+
 export function ssmParams(config: VoiceEngineConfig) {
   const base = `/cosentus-voice-engine/${config.environment}`;
   return {
@@ -40,10 +49,6 @@ export function ssmParams(config: VoiceEngineConfig) {
     RECORDINGS_BUCKET_NAME: `${base}/storage/recordingsBucketName`,
     RECORDINGS_BUCKET_ARN: `${base}/storage/recordingsBucketArn`,
     RECORDINGS_KMS_KEY_ARN: `${base}/storage/recordingsKmsKeyArn`,
-
-    // CertStack (shared cert ARN — env-independent in practice, but per-env
-    // SSM key keeps stack composition clean)
-    CERTIFICATE_ARN: `${base}/cert/certificateArn`,
 
     // ComputeStack
     CLUSTER_ARN: `${base}/compute/clusterArn`,

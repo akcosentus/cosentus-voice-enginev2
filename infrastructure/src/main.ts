@@ -24,7 +24,21 @@
 import 'source-map-support/register';
 import * as cdk from 'aws-cdk-lib';
 import { loadConfig, resourcePrefix } from './config';
-import { EcrStack, NetworkStack, StorageStack } from './stacks';
+import {
+  CertStack,
+  ComputeStack,
+  EcrStack,
+  NetworkStack,
+  StorageStack,
+} from './stacks';
+
+function resolveImageTag(app: cdk.App): string {
+  const fromContext = app.node.tryGetContext('imageTag');
+  if (typeof fromContext === 'string' && fromContext.length > 0) return fromContext;
+  const fromEnv = process.env.IMAGE_TAG;
+  if (typeof fromEnv === 'string' && fromEnv.length > 0) return fromEnv;
+  return 'latest';
+}
 
 const app = new cdk.App();
 const config = loadConfig(app);
@@ -63,10 +77,32 @@ const storageStack = new StorageStack(app, `${prefix}-storage`, {
   tags: { ...commonTags, Stack: 'storage' },
 });
 
-// Stacks publish to SSM and are read via valueFromLookup downstream;
-// no direct CFN-level dependency arrows are required here.
+const certStack = new CertStack(app, 'cosentus-voice-engine-cert', {
+  env,
+  config,
+  description:
+    'Voice engine v2 — wildcard ACM cert covering both env hostnames ' +
+    '(shared, env-independent stack name).',
+  tags: { ...commonTags, Stack: 'cert', Shared: 'true' },
+});
+
+const imageTag = resolveImageTag(app);
+
+const computeStack = new ComputeStack(app, `${prefix}-compute`, {
+  env,
+  config,
+  imageTag,
+  description: `Voice engine v2 — ALB + ECS Fargate + autoscaling + monitoring (${config.environment}).`,
+  tags: { ...commonTags, Stack: 'compute' },
+});
+
+// All cross-stack data flows through SSM (deploy-time CFN dynamic refs).
+// No direct CFN dependency arrows; ordering is enforced by the deploy
+// sequence documented in infrastructure/README.md.
 void ecrStack;
 void networkStack;
 void storageStack;
+void certStack;
+void computeStack;
 
 app.synth();

@@ -48,12 +48,28 @@ export interface VoiceEngineConfig {
   readonly cpu: number;
   /** Fargate task definition memory in MiB. Locked at 2048. */
   readonly memoryMiB: number;
-  /** Auto-scaling min task count. Staging=1, prod=5 (always-warm). */
+  /**
+   * Auto-scaling min task count.
+   *
+   * Staging=1 (validation focus, no always-warm cost).
+   * Prod=1 to start. Raised after Wave 6 mock load tests prove the
+   * platform and real traffic estimates are in hand. Validate-then-commit
+   * — don't burn 24/7 always-warm Fargate cost during validation.
+   */
   readonly minCapacity: number;
-  /** Auto-scaling max task count. Staging=3, prod=25. */
+  /**
+   * Auto-scaling max task count.
+   *
+   * Staging=5 (covers validation N=6 scenario at one-call-per-task).
+   * Prod=25 (headroom for 6 concurrent × 25 tasks = 150 concurrent calls).
+   */
   readonly maxCapacity: number;
   /** Target percent of session capacity that drives scale-out. 70 = scale out at 70%. */
   readonly targetSessionsPct: number;
+  /** Scale-out cooldown — fast (60s) so capacity ramps quickly under burst. */
+  readonly scaleOutCooldownSeconds: number;
+  /** Scale-in cooldown — slow (300s) so we don't yo-yo on transient lulls. */
+  readonly scaleInCooldownSeconds: number;
   /** Max concurrent calls per task (must match engine's max_concurrent_calls). */
   readonly sessionCapacityPerTask: number;
   /** ECS task stopTimeout in seconds. Locked at 120 (matches Layer 9 drain budget). */
@@ -95,8 +111,10 @@ const ENV_DEFAULTS: Record<Environment, Partial<VoiceEngineConfig>> = {
     cpu: 1024,
     memoryMiB: 2048,
     minCapacity: 1,
-    maxCapacity: 3,
+    maxCapacity: 5,
     targetSessionsPct: 70,
+    scaleOutCooldownSeconds: 60,
+    scaleInCooldownSeconds: 300,
     sessionCapacityPerTask: 6,
     stopTimeoutSeconds: 120,
     serviceHostname: 'staging.cosentusaibackend.com',
@@ -110,9 +128,11 @@ const ENV_DEFAULTS: Record<Environment, Partial<VoiceEngineConfig>> = {
     natGateways: 3,
     cpu: 1024,
     memoryMiB: 2048,
-    minCapacity: 5,
+    minCapacity: 1,
     maxCapacity: 25,
     targetSessionsPct: 70,
+    scaleOutCooldownSeconds: 60,
+    scaleInCooldownSeconds: 300,
     sessionCapacityPerTask: 6,
     stopTimeoutSeconds: 120,
     serviceHostname: 'api.cosentusaibackend.com',
@@ -228,6 +248,20 @@ export function loadConfig(app: App): VoiceEngineConfig {
     10,
     95,
   );
+  const scaleOutCooldownSeconds = requirePositiveInt(
+    readSetting(app, 'scaleOutCooldownSeconds', 'SCALE_OUT_COOLDOWN_SECONDS') ??
+      String(defaults.scaleOutCooldownSeconds),
+    'scaleOutCooldownSeconds',
+    30,
+    900,
+  );
+  const scaleInCooldownSeconds = requirePositiveInt(
+    readSetting(app, 'scaleInCooldownSeconds', 'SCALE_IN_COOLDOWN_SECONDS') ??
+      String(defaults.scaleInCooldownSeconds),
+    'scaleInCooldownSeconds',
+    30,
+    3600,
+  );
   const sessionCapacityPerTask = requirePositiveInt(
     readSetting(app, 'sessionCapacityPerTask', 'SESSION_CAPACITY_PER_TASK') ??
       String(defaults.sessionCapacityPerTask),
@@ -273,6 +307,8 @@ export function loadConfig(app: App): VoiceEngineConfig {
     minCapacity,
     maxCapacity,
     targetSessionsPct,
+    scaleOutCooldownSeconds,
+    scaleInCooldownSeconds,
     sessionCapacityPerTask,
     stopTimeoutSeconds,
     domainApex,
