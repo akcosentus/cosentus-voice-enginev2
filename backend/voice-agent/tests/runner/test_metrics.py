@@ -11,11 +11,12 @@ from app.runner.manager import PipelineManager
 from app.runner.metrics import MetricsEmitter
 
 
-def _settings() -> Settings:
+def _settings(environment: str = "production") -> Settings:
     return Settings(
         voice_api_lambda_name="test-voice-api",
         api_key_secret_arn="arn:aws:secretsmanager:us-east-1:0:secret:test",
         max_concurrent_calls=6,
+        environment=environment,
     )
 
 
@@ -31,13 +32,18 @@ def _manager_mock(*, active: int = 0, max_concurrent: int = 6) -> MagicMock:
     return m
 
 
-def _make_emitter(*, active: int = 0, max_concurrent: int = 6) -> tuple[MetricsEmitter, MagicMock]:
+def _make_emitter(
+    *,
+    active: int = 0,
+    max_concurrent: int = 6,
+    environment: str = "production",
+) -> tuple[MetricsEmitter, MagicMock]:
     """Build a MetricsEmitter with a mocked CloudWatch client.
 
     Returns (emitter, cloudwatch_client_mock).
     """
     manager = _manager_mock(active=active, max_concurrent=max_concurrent)
-    settings = _settings()
+    settings = _settings(environment=environment)
     with patch("app.runner.metrics.boto3.client") as boto3_client:
         cw_mock = MagicMock()
         cw_mock.put_metric_data = MagicMock()
@@ -82,15 +88,58 @@ async def test_emit_utilization_percent():
 
 
 @pytest.mark.asyncio
-async def test_emit_with_task_id_dimension(monkeypatch):
-    """When ECS_TASK_ID is set, datapoints carry a TaskId dimension."""
-    monkeypatch.setenv("ECS_TASK_ID", "task-abc-123")
-    # Re-construct so the env-var read at __init__ fires.
-    emitter, cw = _make_emitter()
+async def test_emit_always_carries_environment_dimension():
+    """Wave 3 alarms / scaling policy key on the Environment dimension."""
+    emitter, cw = _make_emitter(environment="staging")
     await emitter._emit()
     metrics = cw.put_metric_data.call_args.kwargs["MetricData"]
     for m in metrics:
-        assert m["Dimensions"] == [{"Name": "TaskId", "Value": "task-abc-123"}]
+        assert {"Name": "Environment", "Value": "staging"} in m["Dimensions"]
+
+
+@pytest.mark.asyncio
+async def test_emit_with_task_id_dimension_appends_to_environment(monkeypatch):
+    """When ECS_TASK_ID is set, datapoints carry Environment AND TaskId."""
+    monkeypatch.setenv("ECS_TASK_ID", "task-abc-123")
+    # Re-construct so the env-var read at __init__ fires.
+    emitter, cw = _make_emitter(environment="prod")
+    await emitter._emit()
+    metrics = cw.put_metric_data.call_args.kwargs["MetricData"]
+    for m in metrics:
+        assert m["Dimensions"] == [
+            {"Name": "Environment", "Value": "prod"},
+            {"Name": "TaskId", "Value": "task-abc-123"},
+        ]
+
+
+# ── emit_drain_timeout ───────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_emit_drain_timeout_puts_count_metric():
+    emitter, cw = _make_emitter(environment="staging")
+    await emitter.emit_drain_timeout(remaining=2)
+    cw.put_metric_data.assert_called_once()
+    kwargs = cw.put_metric_data.call_args.kwargs
+    assert kwargs["Namespace"] == "VoiceAgent/Pipeline"
+    assert len(kwargs["MetricData"]) == 1
+    datapoint = kwargs["MetricData"][0]
+    assert datapoint["MetricName"] == "DrainTimeouts"
+    # Wave 3 alarm sums datapoints; value is per-event (count), not
+    # per-stranded-call. The `remaining` count is in the log line.
+    assert datapoint["Value"] == 1.0
+    assert datapoint["Unit"] == "Count"
+    assert {"Name": "Environment", "Value": "staging"} in datapoint["Dimensions"]
+
+
+@pytest.mark.asyncio
+async def test_emit_drain_timeout_swallows_cloudwatch_errors():
+    """A CloudWatch outage during drain must not propagate — drain
+    has to complete and the task has to exit."""
+    emitter, cw = _make_emitter()
+    cw.put_metric_data = MagicMock(side_effect=RuntimeError("aws outage"))
+    # Must not raise.
+    await emitter.emit_drain_timeout(remaining=3)
 
 
 # ── start / stop lifecycle ───────────────────────────────────────────────

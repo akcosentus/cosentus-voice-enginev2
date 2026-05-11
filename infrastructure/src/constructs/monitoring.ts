@@ -22,22 +22,31 @@ export interface MonitoringConstructProps {
 /**
  * CloudWatch alarms + dashboard for the voice engine.
  *
+ * Metric contract
+ * ---------------
+ * Custom metrics emitted by the engine live under the
+ * `VoiceAgent/Pipeline` namespace (defined in
+ * `app/runner/metrics.py`). All datapoints carry an `Environment`
+ * dimension that separates staging vs prod timeseries — both fleets
+ * deploy into the same AWS account, so dimensionless metrics would
+ * collide.
+ *
+ * If the engine's metric names, namespace, or dimensions change,
+ * update this file in the same commit — silent rename = silent
+ * alarm.
+ *
  * SNS topic for alarm fan-out
  * ---------------------------
  * One topic per env, named `${prefix}-alarms`. Subscriptions
- * (email / SMS / PagerDuty / Slack) are added manually via Console after
- * first deploy — we don't bake operator endpoints into IaC because that
- * pulls personal data into source control and creates merge friction
- * when on-call shifts.
+ * (email / SMS / PagerDuty / Slack) are added manually via Console
+ * after first deploy — we don't bake operator endpoints into IaC.
  *
  * The five alarms (per the Layer 11 brief)
  * ----------------------------------------
  *   1. HighMemoryUtilization        — `AWS/ECS MemoryUtilization` Average
- *                                     > 80 for 5 consecutive 1-minute
- *                                     periods. Headroom check vs the
- *                                     2 GB task budget; Layer 9.5 peak
- *                                     was ~25%, so anything north of
- *                                     80% is a regression.
+ *                                     > 80 for 5×1 min. Layer 9.5 peak
+ *                                     was ~25%, so anything > 80% is
+ *                                     a regression.
  *   2. HighCPUUtilization           — `AWS/ECS CPUUtilization` Average
  *                                     > 80 for 5×1 min. Layer 9.5 peak
  *                                     was 66%; alarm fires before
@@ -46,24 +55,26 @@ export interface MonitoringConstructProps {
  *                                     Maximum >= 1 for 5×1 min. Catches
  *                                     /ready failing → ALB pulling tasks
  *                                     out of rotation.
- *   4. DrainTimeoutsAboveThreshold  — `Cosentus/VoiceEngine DrainTimeouts`
+ *   4. DrainTimeoutsAboveThreshold  — `VoiceAgent/Pipeline DrainTimeouts`
  *                                     Sum > 0 over 1 hour. Engine emits
- *                                     this when graceful shutdown exceeds
- *                                     its budget (wired in Wave 4).
- *   5. ActiveSessionsApproachingMax — `Cosentus/VoiceEngine ActiveSessions`
+ *                                     one datapoint (value=1) per drain
+ *                                     timeout via the optional `metrics`
+ *                                     parameter to graceful_drain.
+ *   5. ActiveSessionsApproachingMax — `VoiceAgent/Pipeline ActiveSessions`
  *                                     fleet-Sum > 20 for 2×1 min. Early
  *                                     warning vs the prod max of
  *                                     6 × 25 = 150 concurrent.
  *
- * `treatMissingData: NOT_BREACHING` for all five — until Wave 4 ships
- * the custom-metric emitters, "no data" must not page the on-call.
+ * `treatMissingData: NOT_BREACHING` for all five — until the first
+ * task lands and starts emitting, "no data" must not page the
+ * on-call.
  *
  * Dashboard
  * ---------
- * One dashboard per env: fleet active sessions, per-task average
- * sessions, RunningTaskCount, CPU/memory, ALB request count + target
- * response time, target healthy/unhealthy hosts. Cost-per-call is
- * deferred to Wave 5 (needs custom metric multi-source maths).
+ * One dashboard per env: fleet ActiveSessions sum, per-task average,
+ * CPU/memory, ALB request count + target response time, healthy/
+ * unhealthy hosts. Cost-per-call is deferred — it needs custom
+ * metric math joining call counts with Fargate runtime totals.
  */
 export class MonitoringConstruct extends Construct {
   public readonly alarmTopic: sns.Topic;
@@ -156,9 +167,9 @@ export class MonitoringConstruct extends Construct {
       alarmName: `${prefix}-drain-timeouts`,
       alarmDescription:
         'Engine reported one or more graceful-drain timeouts in the last hour. ' +
-        'Wave 4 wires the custom-metric emitter; before Wave 4 the alarm cannot fire.',
+        'Emitted by app/runner/metrics.py::emit_drain_timeout (Wave 4).',
       metric: new cloudwatch.Metric({
-        namespace: 'Cosentus/VoiceEngine',
+        namespace: 'VoiceAgent/Pipeline',
         metricName: 'DrainTimeouts',
         dimensionsMap: envDim,
         statistic: 'Sum',
@@ -177,7 +188,7 @@ export class MonitoringConstruct extends Construct {
         'Fleet-wide ActiveSessions > 20 for 2 min — early warning vs the max ' +
         '(6 × maxCapacity).',
       metric: new cloudwatch.Metric({
-        namespace: 'Cosentus/VoiceEngine',
+        namespace: 'VoiceAgent/Pipeline',
         metricName: 'ActiveSessions',
         dimensionsMap: envDim,
         statistic: 'Sum',
@@ -221,7 +232,7 @@ export class MonitoringConstruct extends Construct {
         title: 'Active sessions (fleet sum)',
         left: [
           new cloudwatch.Metric({
-            namespace: 'Cosentus/VoiceEngine',
+            namespace: 'VoiceAgent/Pipeline',
             metricName: 'ActiveSessions',
             dimensionsMap: envDim,
             statistic: 'Sum',
@@ -235,7 +246,7 @@ export class MonitoringConstruct extends Construct {
         title: 'Sessions per task (average)',
         left: [
           new cloudwatch.Metric({
-            namespace: 'Cosentus/VoiceEngine',
+            namespace: 'VoiceAgent/Pipeline',
             metricName: 'ActiveSessions',
             dimensionsMap: envDim,
             statistic: 'Average',

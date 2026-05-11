@@ -55,10 +55,11 @@ export interface EcsServiceConstructProps {
  *
  * Auto-scaling — target tracking on `ActiveSessions`
  * --------------------------------------------------
- *   - Target metric: `Cosentus/VoiceEngine/ActiveSessions` (custom),
- *     statistic Average, period 60s. Emitted per-task by the engine
- *     (Wave 4 follow-up). Until that emitter ships the metric is
- *     undefined and autoscaling stays at min — safe.
+ *   - Target metric: `VoiceAgent/Pipeline / ActiveSessions` (custom),
+ *     dimension `{Environment}`, statistic Average, period 60s.
+ *     Emitted by `app/runner/metrics.py` every 30s. Wave 3 task
+ *     definition does NOT set ECS_TASK_ID, so the emitter publishes
+ *     the Environment-only timeseries that this policy reads.
  *   - Target value: 70% of session capacity = floor(6 × 0.7) = 4.2.
  *     CDK accepts the fractional target; CloudWatch compares against it
  *     directly.
@@ -87,7 +88,7 @@ export interface EcsServiceConstructProps {
  *     KMS encrypt/decrypt/generate-data-key on the recordings KMS key,
  *     lambda:InvokeFunction on `cosentus-voice-api-*`,
  *     cloudwatch:PutMetricData restricted to the
- *     `Cosentus/VoiceEngine` namespace, and ecs:UpdateTaskProtection
+ *     `VoiceAgent/Pipeline` namespace, and ecs:UpdateTaskProtection
  *     scoped to this cluster's task ARNs.
  */
 export class EcsServiceConstruct extends Construct {
@@ -229,15 +230,18 @@ export class EcsServiceConstruct extends Construct {
     const targetValue =
       (config.sessionCapacityPerTask * config.targetSessionsPct) / 100;
 
+    // Metric contract matches `app/runner/metrics.py`:
+    //   namespace=VoiceAgent/Pipeline, name=ActiveSessions,
+    //   dimensions={Environment}. Wave 3 task definition deliberately
+    //   does NOT set ECS_TASK_ID, so the emitter publishes the
+    //   Environment-only timeseries that this policy reads. If
+    //   anything in the emitter changes (rename, new dimension),
+    //   update here too.
     scalableTarget.scaleToTrackCustomMetric('ActiveSessionsTracking', {
       metric: new cloudwatch.Metric({
-        namespace: 'Cosentus/VoiceEngine',
+        namespace: 'VoiceAgent/Pipeline',
         metricName: 'ActiveSessions',
-        dimensionsMap: {
-          Environment: config.environment,
-          ClusterName: this.cluster.clusterName,
-          ServiceName: `${prefix}-service`,
-        },
+        dimensionsMap: { Environment: config.environment },
         statistic: 'Average',
         period: cdk.Duration.minutes(1),
       }),
@@ -338,8 +342,11 @@ export class EcsServiceConstruct extends Construct {
         actions: ['cloudwatch:PutMetricData'],
         resources: ['*'],
         conditions: {
+          // Must match _METRIC_NAMESPACE in app/runner/metrics.py.
+          // PutMetricData uses no resource ARN; namespace condition is
+          // the only way to scope it.
           StringEquals: {
-            'cloudwatch:namespace': 'Cosentus/VoiceEngine',
+            'cloudwatch:namespace': 'VoiceAgent/Pipeline',
           },
         },
       }),

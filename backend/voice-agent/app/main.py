@@ -116,7 +116,11 @@ async def amain() -> None:
 
     async def _drain_and_shutdown(sig_name: str) -> None:
         logger.info("signal_handling_started", signal=sig_name)
-        await graceful_drain(manager, protection)
+        # Pass the metrics emitter so graceful_drain can publish
+        # DrainTimeouts (feeds Wave 3's DrainTimeoutsAboveThreshold
+        # alarm). The emitter is stopped AFTER drain so any
+        # timeout-path emission has a live boto3 client.
+        await graceful_drain(manager, protection, metrics=metrics)
         await metrics.stop()
         await daily_client.close()
         shutdown_event.set()

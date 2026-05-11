@@ -175,6 +175,25 @@ async def test_signal_handler_drives_drain_through_completion():
 
 
 @pytest.mark.asyncio
+async def test_amain_passes_metrics_emitter_to_graceful_drain():
+    """Wave 4 wiring: graceful_drain must receive the live
+    MetricsEmitter so DrainTimeouts can be published when budget
+    is exceeded. Without this, Wave 3's DrainTimeoutsAboveThreshold
+    alarm has no data to evaluate.
+    """
+    drain_mock, *layer_mocks = _patch_amain_dependencies()
+    await _run_amain_and_capture_handlers(drain_mock, *layer_mocks)
+
+    drain_mock.assert_awaited_once()
+    # graceful_drain is called as (manager, protection, metrics=metrics).
+    # The metrics kwarg must be the same MetricsEmitter instance that
+    # was constructed (and started) earlier in amain.
+    _, kwargs = drain_mock.call_args
+    metrics_mock = layer_mocks[3]
+    assert kwargs.get("metrics") is metrics_mock
+
+
+@pytest.mark.asyncio
 async def test_signal_handler_holds_shutdown_task_until_drain_finishes():
     """If the spawned task were unreferenced, a slow drain wouldn't
     complete — Python could GC the task mid-await. With the

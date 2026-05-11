@@ -553,3 +553,72 @@ async def test_drain_cancels_only_active_sessions_not_all_tasks():
 async def test_drain_default_budget_is_110():
     """Sanity: matches Fargate's 120s default stopTimeout minus 10s buffer."""
     assert DEFAULT_DRAIN_BUDGET_SECS == 110
+
+
+# ── graceful_drain ↔ MetricsEmitter wiring ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_drain_calls_emit_drain_timeout_on_timeout():
+    """Wave 4: on the budget-exceeded branch, DrainTimeouts must be
+    published so Wave 3's alarm has a datapoint to evaluate."""
+    manager = _manager_mock()
+    protection = MagicMock()
+    protection.set_protected = AsyncMock()
+    protection.close = AsyncMock()
+
+    bot_event = asyncio.Event()
+
+    async def slow_bot():
+        try:
+            await bot_event.wait()
+        except asyncio.CancelledError:
+            raise
+
+    fake_task = asyncio.create_task(slow_bot(), name="slow-bot")
+    manager._active_sessions = {"call-1": fake_task}
+    manager.active_sessions = manager._active_sessions
+    type(manager).active_session_count = property(lambda self: len(self.active_sessions))
+
+    metrics = MagicMock()
+    metrics.emit_drain_timeout = AsyncMock()
+
+    try:
+        await graceful_drain(manager, protection, budget_secs=0, metrics=metrics)
+    finally:
+        bot_event.set()
+
+    # The emitter saw exactly one drain-timeout event with the active
+    # session count at the moment of timeout (= 1, the stuck session).
+    metrics.emit_drain_timeout.assert_awaited_once_with(1)
+
+
+@pytest.mark.asyncio
+async def test_drain_does_not_emit_when_no_timeout():
+    """When drain completes within budget, no DrainTimeouts event fires."""
+    manager = _manager_mock()
+    protection = MagicMock()
+    protection.set_protected = AsyncMock()
+    protection.close = AsyncMock()
+    # active_session_count starts at 0 → loop exits immediately.
+    metrics = MagicMock()
+    metrics.emit_drain_timeout = AsyncMock()
+
+    await graceful_drain(manager, protection, budget_secs=10, metrics=metrics)
+
+    metrics.emit_drain_timeout.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_drain_works_without_metrics_emitter():
+    """Backward compatibility: callers without a MetricsEmitter (e.g.,
+    older tests, local dev) must still see drain complete cleanly."""
+    manager = _manager_mock()
+    protection = MagicMock()
+    protection.set_protected = AsyncMock()
+    protection.close = AsyncMock()
+
+    # Should not raise even though metrics=None on the timeout path.
+    await graceful_drain(manager, protection, budget_secs=0)
+    manager.shutdown.assert_awaited_once()
+    protection.set_protected.assert_awaited_with(False)

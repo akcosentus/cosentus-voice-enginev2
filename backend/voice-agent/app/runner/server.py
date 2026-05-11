@@ -35,7 +35,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import boto3
 import structlog
@@ -44,6 +44,13 @@ from aiohttp import web
 from app.config.settings import Settings
 from app.runner.manager import CapacityRejected, PipelineManager
 from app.runner.protection import TaskProtection
+
+if TYPE_CHECKING:
+    # MetricsEmitter is optional in graceful_drain (callable from
+    # contexts that don't have one, e.g. tests). Import only for the
+    # type hint to avoid pulling boto3-client construction into the
+    # module import path.
+    from app.runner.metrics import MetricsEmitter
 
 # Typed AppKey instances. aiohttp 3.9+ recommends these for app[]
 # storage to avoid the ``NotAppKeyWarning`` and to give type-checkers
@@ -429,6 +436,7 @@ async def graceful_drain(
     protection: TaskProtection,
     *,
     budget_secs: int = DEFAULT_DRAIN_BUDGET_SECS,
+    metrics: "MetricsEmitter | None" = None,
 ) -> None:
     """SIGTERM-driven drain. Set draining flag, wait for active calls,
     cancel survivors, release protection.
@@ -446,6 +454,11 @@ async def graceful_drain(
     protection release + cleanup work. Layer 11 may bump Fargate's
     stopTimeout for longer Cosentus IVR calls; pass a matching
     larger ``budget_secs`` here.
+
+    ``metrics`` is optional. When supplied, the drain-timeout
+    branch publishes a ``DrainTimeouts`` CloudWatch counter to
+    feed Wave 3's alarm. Tests pass ``metrics=None`` and skip the
+    emission path entirely.
     """
     logger.info(
         "drain_starting",
@@ -458,11 +471,17 @@ async def graceful_drain(
     while manager.active_session_count > 0:
         elapsed = time.time() - drain_start
         if elapsed > budget_secs:
+            remaining = manager.active_session_count
             logger.warning(
                 "drain_timeout",
-                remaining=manager.active_session_count,
+                remaining=remaining,
                 elapsed_secs=round(elapsed, 1),
             )
+            if metrics is not None:
+                # Best-effort CloudWatch counter; emit_drain_timeout
+                # swallows its own errors so a CloudWatch outage can't
+                # block the cancel-and-exit path below.
+                await metrics.emit_drain_timeout(remaining)
             # Cancel only the engine's tasks — NOT asyncio.all_tasks.
             for task in list(manager.active_sessions.values()):
                 task.cancel()
