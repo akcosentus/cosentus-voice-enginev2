@@ -1,6 +1,7 @@
 node_modules/
 dist/
 cdk.out/
+cdk-out/
 cdk.context.json
 *.tsbuildinfo
 .env
