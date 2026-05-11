@@ -105,7 +105,7 @@ export class VpcConstruct extends Construct {
     this.taskSecurityGroup.addIngressRule(
       this.albSecurityGroup,
       ec2.Port.tcp(8080),
-      'Engine HTTP port — ALB only',
+      'Engine HTTP port - ALB only',
     );
 
     this.vpc.addGatewayEndpoint('S3GatewayEndpoint', {
