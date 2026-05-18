@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -56,7 +57,10 @@ from .http_caller import CallResultBatch, HttpCaller
 logger = structlog.get_logger(__name__)
 
 
-SOAK_DURATION_SECS = 4 * 60 * 60  # 4 hours
+# 4 h default; override with ``WAVE6_SOAK_DURATION_SECS`` env var for
+# shorter Path-A revalidation runs (e.g., 2 h after Option I to verify
+# the autoscaling + force_gc fix holds before declaring Wave 6 done).
+SOAK_DURATION_SECS = int(os.environ.get("WAVE6_SOAK_DURATION_SECS", str(4 * 60 * 60)))
 SOAK_CALLS_PER_SEC = 0.2          # 12 cpm
 HEARTBEAT_INTERVAL_SECS = 60
 ERROR_RATE_THRESHOLD_PCT = 1.0
