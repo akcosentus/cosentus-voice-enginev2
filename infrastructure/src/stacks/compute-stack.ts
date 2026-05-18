@@ -10,6 +10,7 @@ import {
   AlbConstruct,
   EcsServiceConstruct,
   MonitoringConstruct,
+  TaskRecyclerConstruct,
 } from '../constructs';
 
 export interface ComputeStackProps extends cdk.StackProps {
@@ -53,6 +54,7 @@ export class ComputeStack extends cdk.Stack {
   public readonly alb: AlbConstruct;
   public readonly ecsService: EcsServiceConstruct;
   public readonly monitoring: MonitoringConstruct;
+  public readonly taskRecycler: TaskRecyclerConstruct;
 
   constructor(scope: Construct, id: string, props: ComputeStackProps) {
     super(scope, id, props);
@@ -184,6 +186,21 @@ export class ComputeStack extends cdk.Stack {
       serviceName: `${prefix}-service`,
       targetGroup: this.alb.targetGroup,
       loadBalancer: this.alb.alb,
+    });
+
+    // Wave 6 Phase B1 (2026-05-18). Periodic ECS rolling-deploy
+    // trigger bounds the residual memory leak from Pipecat #3750 +
+    // residual Python cycle leak. minHealthyPercent=100 on the
+    // service keeps traffic uninterrupted during the recycle.
+    this.taskRecycler = new TaskRecyclerConstruct(this, 'TaskRecycler', {
+      config,
+      clusterArn: this.ecsService.cluster.clusterArn,
+      clusterName: this.ecsService.cluster.clusterName,
+      serviceArn: this.ecsService.service.serviceArn,
+      serviceName: this.ecsService.service.serviceName,
+      // Default schedule (1 h) is correct; explicit here for
+      // readability.
+      schedule: undefined,
     });
 
     new ssm.StringParameter(this, 'AlbDnsNameParam', {
