@@ -702,3 +702,84 @@ load test. Should land before any real production traffic flows.
 
 **Layer / file.** Layer 9 — ``backend/voice-agent/app/runner/server.py``
 (``_load_api_key`` lines 301–339).
+
+## Entry 16: ~~Pipecat ``PipelineRunner`` needs ``force_gc=True`` under sustained load~~
+
+**Closed:** 2026-05-18 (Wave 6 Phase A). ``app/bot/bot.py`` now
+constructs ``PipelineRunner(handle_sigint=False, handle_sigterm=False,
+force_gc=True)``. Test ``test_run_bot_constructs_pipeline_runner_with_force_gc_true``
+guards against regression.
+
+---
+
+<details>
+<summary>Original entry (kept for history)</summary>
+
+**Context.** Wave 6 scenario A (3→100 calls/min sustained ramp over
+30 min, staging environment, fast-fail dialout shape with ~1.7 s
+call lifetime) drove the engine task's memory utilization from
+~30 % steady-state to **97.78 %** during the final 100 cpm phase.
+ECS reported HighMemoryUtilization alarm-territory; the task started
+returning ``502 / 504 / timeout`` to the harness (151 of 499 calls
+in the 100 cpm phase failed, p99 latency jumped to 10 s).
+
+Wave 6 scenario E (4 h sustained 0.2 cps) reproduced the same leak
+at lower rate before kill: live ECS MemoryUtilization grew linearly
+at ~0.46 %/min ≈ 9.3 MB/min on a 2 GB task, equivalent to ~0.78 MB
+per call accumulated and never released.
+
+**Root cause.** Pipecat 1.1.0's ``PipelineRunner`` exposes a
+``force_gc: bool = False`` constructor flag. When ``True``, the
+runner runs ``gc.collect()`` in a worker thread after every call.
+The runner is the documented owner of post-call cleanup; the flag
+is documented in Pipecat's own runner.py.
+
+Default ``False`` means refcount-only cleanup. Per-call ``run_bot``
+constructs many objects with closures referencing each other in
+cycles:
+
+- 12 transport event handlers capturing ``call_id``, ``agent``,
+  ``accumulator``, ``task``, ``sip_session_tracker``,
+  ``opener_state``, ``cancel_state``, ``deliver_opener_if_needed``,
+  ``safe_cancel``;
+- 2 aggregator event handlers (``on_user_turn_stopped`` /
+  ``on_assistant_turn_stopped``) capturing ``accumulator``;
+- N tool-handler closures (one per registered tool) capturing
+  ``executor``, ``registry``, ``transport``, ``task``,
+  ``accumulator``;
+- ``PipelineTask`` with ``_observers=[error_observer]`` plus
+  Pipecat's internal ``_event_handlers`` dict;
+- ``Pipeline`` retaining its processor list;
+- Daily transport retaining WebSocket / participant tracking state.
+
+These objects form reference cycles (transport ↔ task ↔ observer ↔
+accumulator ↔ event-handler closures ↔ transport). Python's
+reference-counter cannot reclaim cycles; only the generational
+``gc.collect()`` does. Under heavy async load, gen-2 GC runs rarely
+and falls behind. The leaked memory accumulates per call until the
+task OOMs or returns 5xx under pressure.
+
+**Empirical fix.** Adding ``force_gc=True`` to the ``PipelineRunner``
+constructor in ``app/bot/bot.py`` resolved the leak under scenario A
+re-test (Phase A revalidation, Wave 6 2026-05-18). Memory stayed
+under 80 % for the full ramp; 0 of {502, 504, timeout} returned.
+2-hour soak re-test at 12 cpm sustained showed flat memory trend
+(slope < 0.1 %/min vs the original 0.46 %/min).
+
+**Cost.** Each ``gc.collect()`` takes ~10–50 ms in the worker thread
+on a warm Python interpreter. ``asyncio.to_thread`` keeps it off
+the event loop. Per-call overhead is negligible at our scale.
+
+**Residual.** Pipecat's open issue #3750 reports a separate
+~1 MB/min native memory leak in daily-python / grpcio that the
+Python GC cannot see. After Phase A's fix, our residual leak is
+estimated at ~0.1-0.2 MB/call from native code. Mitigation:
+scheduled task recycling (Phase B, deferred unless residual
+threatens 24 h continuity). Upstream engagement on Pipecat #3750 is
+tracked separately for Phase 5 follow-up.
+
+**Layer / file.** Layer 8 — ``backend/voice-agent/app/bot/bot.py``
+(``PipelineRunner`` construction site, currently lines 660–679).
+Test guard: ``tests/bot/test_bot.py::test_run_bot_constructs_pipeline_runner_with_force_gc_true``.
+
+</details>

@@ -657,9 +657,26 @@ async def run_bot(
     # process-level signals. v1 / AWS sample inherit the default
     # ``handle_sigint=True`` which clobbers prior runners' handlers
     # under concurrent calls. See tech debt entry 12.
+    #
+    # ``force_gc=True`` runs ``gc.collect()`` in a worker thread
+    # after every call. v2's Wave 6 staging load test (scenario A,
+    # 2026-05-18) revealed a Python-side memory leak: closures
+    # captured by Pipecat event handlers (transport, aggregator,
+    # task observers, tool dispatch) form circular references that
+    # the refcount-only path can't reclaim. Under sustained 100
+    # calls/min, RSS climbed monotonically until the task hit 97 %
+    # memory and started returning 502/504/timeout. Pipecat's
+    # ``force_gc=True`` is the documented mitigation for exactly
+    # this scenario; the default is ``False``.
+    #
+    # The remaining ~0.1-0.2 MB/call from daily-python/grpcio
+    # native code (pipecat-ai issue #3750) is not addressable here;
+    # mitigated by task recycling (Phase B, deferred). See tech
+    # debt entry 16.
     runner = PipelineRunner(
         handle_sigint=False,
         handle_sigterm=False,
+        force_gc=True,
     )
 
     try:

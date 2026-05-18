@@ -377,6 +377,39 @@ async def test_run_bot_constructs_pipeline_runner_with_signal_handlers_off():
 
 
 @pytest.mark.asyncio
+async def test_run_bot_constructs_pipeline_runner_with_force_gc_true():
+    """PipelineRunner MUST be constructed with force_gc=True.
+
+    Closes the leak found during Wave 6 scenario A (100 cpm sustained
+    drove RSS to 97.78%). Pipecat's runner runs gc.collect() in a
+    worker thread after every call when this flag is set; without it,
+    circular references between transport / aggregator / task /
+    observer / event-handler closures accumulate until the task
+    OOMs. See tech debt entry 16 for the full investigation.
+
+    If a future engineer ever removes force_gc=True (because "tests
+    pass", or because they're chasing test latency), this assertion
+    fires loudly. Do NOT remove without re-running scenario A.
+    """
+    agent, mocks = _patch_run_bot_dependencies()
+    transport = _make_transport_mock()
+    patches = _start_run_bot_patches(agent, mocks, transport)
+    for p in patches:
+        p.start()
+    try:
+        await run_bot(transport, _runner_args(), _settings())
+    finally:
+        for p in patches:
+            p.stop()
+
+    kwargs = mocks["runner_kwargs"]
+    assert kwargs["force_gc"] is True, (
+        "PipelineRunner must be constructed with force_gc=True. "
+        "See docs/v2-tech-debt-log.md entry 16."
+    )
+
+
+@pytest.mark.asyncio
 async def test_run_bot_attaches_error_observer_to_pipeline_task():
     """After the May 2026 transcript-observer rewrite, only the
     ErrorObserver remains on PipelineTask.observers. Transcript
