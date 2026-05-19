@@ -1,0 +1,89 @@
+{"cycle": 1, "elapsed_secs": 60.0, "elapsed_hours": 0.017, "calls_total": 12, "accepted": 12, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T22:33:52.960671+00:00"}
+{"cycle": 2, "elapsed_secs": 120.0, "elapsed_hours": 0.033, "calls_total": 24, "accepted": 24, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T22:34:52.972537+00:00"}
+{"cycle": 3, "elapsed_secs": 180.0, "elapsed_hours": 0.05, "calls_total": 36, "accepted": 36, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T22:35:52.986265+00:00"}
+{"cycle": 4, "elapsed_secs": 240.1, "elapsed_hours": 0.067, "calls_total": 48, "accepted": 48, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T22:36:52.996752+00:00"}
+{"cycle": 5, "elapsed_secs": 300.1, "elapsed_hours": 0.083, "calls_total": 60, "accepted": 60, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T22:37:53.008950+00:00"}
+{"cycle": 6, "elapsed_secs": 360.1, "elapsed_hours": 0.1, "calls_total": 72, "accepted": 72, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T22:38:53.032720+00:00"}
+{"cycle": 7, "elapsed_secs": 420.1, "elapsed_hours": 0.117, "calls_total": 84, "accepted": 84, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T22:39:53.050141+00:00"}
+{"cycle": 8, "elapsed_secs": 480.1, "elapsed_hours": 0.133, "calls_total": 96, "accepted": 96, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T22:40:53.071583+00:00"}
+{"cycle": 9, "elapsed_secs": 540.2, "elapsed_hours": 0.15, "calls_total": 108, "accepted": 108, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T22:41:53.096390+00:00"}
+{"cycle": 10, "elapsed_secs": 600.2, "elapsed_hours": 0.167, "calls_total": 120, "accepted": 120, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T22:42:53.113989+00:00"}
+{"cycle": 11, "elapsed_secs": 660.2, "elapsed_hours": 0.183, "calls_total": 132, "accepted": 132, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T22:43:53.136431+00:00"}
+{"cycle": 12, "elapsed_secs": 720.2, "elapsed_hours": 0.2, "calls_total": 144, "accepted": 144, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T22:44:53.157435+00:00"}
+{"cycle": 13, "elapsed_secs": 780.2, "elapsed_hours": 0.217, "calls_total": 156, "accepted": 156, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T22:45:53.170945+00:00"}
+{"cycle": 14, "elapsed_secs": 840.2, "elapsed_hours": 0.233, "calls_total": 168, "accepted": 168, "rejected_503": 0, "other": {}, "in_flight": 0, "ts": "2026-05-18T22:46:53.175768+00:00"}
+{"cycle": 15, "elapsed_secs": 900.2, "elapsed_hours": 0.25, "calls_total": 180, "accepted": 180, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T22:47:53.189856+00:00"}
+{"cycle": 16, "elapsed_secs": 960.3, "elapsed_hours": 0.267, "calls_total": 192, "accepted": 192, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T22:48:53.203591+00:00"}
+{"cycle": 17, "elapsed_secs": 1020.3, "elapsed_hours": 0.283, "calls_total": 204, "accepted": 204, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T22:49:53.212942+00:00"}
+{"cycle": 18, "elapsed_secs": 1080.3, "elapsed_hours": 0.3, "calls_total": 216, "accepted": 216, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T22:50:53.224961+00:00"}
+{"cycle": 19, "elapsed_secs": 1140.3, "elapsed_hours": 0.317, "calls_total": 228, "accepted": 228, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T22:51:53.238555+00:00"}
+{"cycle": 20, "elapsed_secs": 1200.3, "elapsed_hours": 0.333, "calls_total": 240, "accepted": 240, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T22:52:53.250539+00:00"}
+{"cycle": 21, "elapsed_secs": 1260.3, "elapsed_hours": 0.35, "calls_total": 252, "accepted": 252, "rejected_503": 0, "other": {}, "in_flight": 0, "ts": "2026-05-18T22:53:53.257540+00:00"}
+{"cycle": 22, "elapsed_secs": 1320.3, "elapsed_hours": 0.367, "calls_total": 264, "accepted": 264, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T22:54:53.272842+00:00"}
+{"cycle": 23, "elapsed_secs": 1380.3, "elapsed_hours": 0.383, "calls_total": 276, "accepted": 276, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T22:55:53.284564+00:00"}
+{"cycle": 24, "elapsed_secs": 1440.4, "elapsed_hours": 0.4, "calls_total": 288, "accepted": 288, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T22:56:53.296875+00:00"}
+{"cycle": 25, "elapsed_secs": 1500.4, "elapsed_hours": 0.417, "calls_total": 300, "accepted": 300, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T22:57:53.308084+00:00"}
+{"cycle": 26, "elapsed_secs": 1560.4, "elapsed_hours": 0.433, "calls_total": 312, "accepted": 312, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T22:58:53.321346+00:00"}
+{"cycle": 27, "elapsed_secs": 1620.4, "elapsed_hours": 0.45, "calls_total": 324, "accepted": 324, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T22:59:53.358345+00:00"}
+{"cycle": 28, "elapsed_secs": 1680.4, "elapsed_hours": 0.467, "calls_total": 336, "accepted": 336, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T23:00:53.372403+00:00"}
+{"cycle": 29, "elapsed_secs": 1740.4, "elapsed_hours": 0.483, "calls_total": 348, "accepted": 348, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T23:01:53.385600+00:00"}
+{"cycle": 30, "elapsed_secs": 1800.4, "elapsed_hours": 0.5, "calls_total": 360, "accepted": 360, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T23:02:53.400718+00:00"}
+{"cycle": 31, "elapsed_secs": 1860.5, "elapsed_hours": 0.517, "calls_total": 372, "accepted": 372, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T23:03:53.418767+00:00"}
+{"cycle": 32, "elapsed_secs": 1920.5, "elapsed_hours": 0.533, "calls_total": 384, "accepted": 384, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T23:04:53.430563+00:00"}
+{"cycle": 33, "elapsed_secs": 1980.5, "elapsed_hours": 0.55, "calls_total": 396, "accepted": 396, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T23:05:53.442033+00:00"}
+{"cycle": 34, "elapsed_secs": 2040.5, "elapsed_hours": 0.567, "calls_total": 408, "accepted": 408, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T23:06:53.451610+00:00"}
+{"cycle": 35, "elapsed_secs": 2100.5, "elapsed_hours": 0.583, "calls_total": 420, "accepted": 420, "rejected_503": 0, "other": {}, "in_flight": 0, "ts": "2026-05-18T23:07:53.460337+00:00"}
+{"cycle": 36, "elapsed_secs": 2160.5, "elapsed_hours": 0.6, "calls_total": 432, "accepted": 432, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T23:08:53.474749+00:00"}
+{"cycle": 37, "elapsed_secs": 2220.5, "elapsed_hours": 0.617, "calls_total": 444, "accepted": 444, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T23:09:53.487402+00:00"}
+{"cycle": 38, "elapsed_secs": 2280.5, "elapsed_hours": 0.633, "calls_total": 456, "accepted": 456, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T23:10:53.502291+00:00"}
+{"cycle": 39, "elapsed_secs": 2340.6, "elapsed_hours": 0.65, "calls_total": 468, "accepted": 468, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T23:11:53.517097+00:00"}
+{"cycle": 40, "elapsed_secs": 2400.6, "elapsed_hours": 0.667, "calls_total": 480, "accepted": 480, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T23:12:53.529622+00:00"}
+{"cycle": 41, "elapsed_secs": 2460.6, "elapsed_hours": 0.683, "calls_total": 492, "accepted": 492, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T23:13:53.545284+00:00"}
+{"cycle": 42, "elapsed_secs": 2520.6, "elapsed_hours": 0.7, "calls_total": 504, "accepted": 504, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T23:14:53.556301+00:00"}
+{"cycle": 43, "elapsed_secs": 2580.6, "elapsed_hours": 0.717, "calls_total": 516, "accepted": 516, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T23:15:53.570904+00:00"}
+{"cycle": 44, "elapsed_secs": 2640.6, "elapsed_hours": 0.734, "calls_total": 528, "accepted": 528, "rejected_503": 0, "other": {}, "in_flight": 1, "ts": "2026-05-18T23:16:53.591933+00:00"}
+{"cycle": 45, "elapsed_secs": 2700.6, "elapsed_hours": 0.75, "calls_total": 539, "accepted": 539, "rejected_503": 0, "other": {}, "in_flight": 2, "ts": "2026-05-18T23:17:53.609970+00:00"}
+{"cycle": 46, "elapsed_secs": 2760.7, "elapsed_hours": 0.767, "calls_total": 552, "accepted": 552, "rejected_503": 0, "other": {}, "in_flight": 0, "ts": "2026-05-18T23:18:53.619144+00:00"}
+{"cycle": 47, "elapsed_secs": 2820.7, "elapsed_hours": 0.784, "calls_total": 563, "accepted": 561, "rejected_503": 0, "other": {"timeout": 2}, "in_flight": 1, "ts": "2026-05-18T23:19:53.623269+00:00"}
+{"cycle": 48, "elapsed_secs": 2880.7, "elapsed_hours": 0.8, "calls_total": 575, "accepted": 567, "rejected_503": 0, "other": {"timeout": 8}, "in_flight": 1, "ts": "2026-05-18T23:20:53.642373+00:00"}
+{"cycle": 49, "elapsed_secs": 2940.7, "elapsed_hours": 0.817, "calls_total": 588, "accepted": 577, "rejected_503": 0, "other": {"timeout": 11}, "in_flight": 0, "ts": "2026-05-18T23:21:53.651505+00:00"}
+{"cycle": 50, "elapsed_secs": 3000.7, "elapsed_hours": 0.834, "calls_total": 600, "accepted": 589, "rejected_503": 0, "other": {"timeout": 11}, "in_flight": 0, "ts": "2026-05-18T23:22:53.694097+00:00"}
+{"cycle": 51, "elapsed_secs": 3060.7, "elapsed_hours": 0.85, "calls_total": 612, "accepted": 601, "rejected_503": 0, "other": {"timeout": 11}, "in_flight": 0, "ts": "2026-05-18T23:23:53.708452+00:00"}
+{"cycle": 52, "elapsed_secs": 3120.8, "elapsed_hours": 0.867, "calls_total": 624, "accepted": 613, "rejected_503": 0, "other": {"timeout": 11}, "in_flight": 1, "ts": "2026-05-18T23:24:53.746153+00:00"}
+{"cycle": 53, "elapsed_secs": 3180.8, "elapsed_hours": 0.884, "calls_total": 636, "accepted": 625, "rejected_503": 0, "other": {"timeout": 11}, "in_flight": 1, "ts": "2026-05-18T23:25:53.759316+00:00"}
+{"cycle": 54, "elapsed_secs": 3240.8, "elapsed_hours": 0.9, "calls_total": 648, "accepted": 637, "rejected_503": 0, "other": {"timeout": 11}, "in_flight": 1, "ts": "2026-05-18T23:26:53.770843+00:00"}
+{"cycle": 55, "elapsed_secs": 3300.8, "elapsed_hours": 0.917, "calls_total": 660, "accepted": 649, "rejected_503": 0, "other": {"timeout": 11}, "in_flight": 1, "ts": "2026-05-18T23:27:53.783934+00:00"}
+{"cycle": 56, "elapsed_secs": 3360.8, "elapsed_hours": 0.934, "calls_total": 672, "accepted": 661, "rejected_503": 0, "other": {"timeout": 11}, "in_flight": 1, "ts": "2026-05-18T23:28:53.796151+00:00"}
+{"cycle": 57, "elapsed_secs": 3420.9, "elapsed_hours": 0.95, "calls_total": 684, "accepted": 673, "rejected_503": 0, "other": {"timeout": 11}, "in_flight": 1, "ts": "2026-05-18T23:29:53.812664+00:00"}
+{"cycle": 58, "elapsed_secs": 3480.9, "elapsed_hours": 0.967, "calls_total": 696, "accepted": 685, "rejected_503": 0, "other": {"timeout": 11}, "in_flight": 1, "ts": "2026-05-18T23:30:53.831561+00:00"}
+{"cycle": 59, "elapsed_secs": 3540.9, "elapsed_hours": 0.984, "calls_total": 708, "accepted": 697, "rejected_503": 0, "other": {"timeout": 11}, "in_flight": 1, "ts": "2026-05-18T23:31:53.851849+00:00"}
+{"cycle": 60, "elapsed_secs": 3600.9, "elapsed_hours": 1.0, "calls_total": 720, "accepted": 709, "rejected_503": 0, "other": {"timeout": 11}, "in_flight": 0, "ts": "2026-05-18T23:32:53.852585+00:00"}
+{"cycle": 61, "elapsed_secs": 3660.9, "elapsed_hours": 1.017, "calls_total": 732, "accepted": 721, "rejected_503": 0, "other": {"timeout": 11}, "in_flight": 0, "ts": "2026-05-18T23:33:53.861479+00:00"}
+{"cycle": 62, "elapsed_secs": 3720.9, "elapsed_hours": 1.034, "calls_total": 744, "accepted": 733, "rejected_503": 0, "other": {"timeout": 11}, "in_flight": 0, "ts": "2026-05-18T23:34:53.898689+00:00"}
+{"cycle": 63, "elapsed_secs": 3780.9, "elapsed_hours": 1.05, "calls_total": 756, "accepted": 745, "rejected_503": 0, "other": {"timeout": 11}, "in_flight": 0, "ts": "2026-05-18T23:35:53.913765+00:00"}
+{"cycle": 64, "elapsed_secs": 3841.0, "elapsed_hours": 1.067, "calls_total": 768, "accepted": 757, "rejected_503": 0, "other": {"timeout": 11}, "in_flight": 0, "ts": "2026-05-18T23:36:53.937285+00:00"}
+{"cycle": 65, "elapsed_secs": 3901.0, "elapsed_hours": 1.084, "calls_total": 780, "accepted": 769, "rejected_503": 0, "other": {"timeout": 11}, "in_flight": 0, "ts": "2026-05-18T23:37:53.966719+00:00"}
+{"cycle": 66, "elapsed_secs": 3961.0, "elapsed_hours": 1.1, "calls_total": 792, "accepted": 781, "rejected_503": 0, "other": {"timeout": 11}, "in_flight": 0, "ts": "2026-05-18T23:38:53.973689+00:00"}
+{"cycle": 67, "elapsed_secs": 4021.0, "elapsed_hours": 1.117, "calls_total": 804, "accepted": 793, "rejected_503": 0, "other": {"timeout": 11}, "in_flight": 0, "ts": "2026-05-18T23:39:54.001385+00:00"}
+{"cycle": 68, "elapsed_secs": 4081.0, "elapsed_hours": 1.134, "calls_total": 816, "accepted": 805, "rejected_503": 0, "other": {"timeout": 11}, "in_flight": 0, "ts": "2026-05-18T23:40:54.014909+00:00"}
+{"cycle": 69, "elapsed_secs": 4141.1, "elapsed_hours": 1.15, "calls_total": 828, "accepted": 817, "rejected_503": 0, "other": {"timeout": 11}, "in_flight": 0, "ts": "2026-05-18T23:41:54.043706+00:00"}
+{"cycle": 70, "elapsed_secs": 4201.1, "elapsed_hours": 1.167, "calls_total": 840, "accepted": 825, "rejected_503": 0, "other": {"timeout": 12, "error": 3}, "in_flight": 0, "ts": "2026-05-19T01:43:10.088324+00:00"}
+{"cycle": 71, "elapsed_secs": 4261.1, "elapsed_hours": 1.184, "calls_total": 851, "accepted": 831, "rejected_503": 0, "other": {"timeout": 14, "error": 6}, "in_flight": 1, "ts": "2026-05-19T04:49:49.524074+00:00"}
+{"cycle": 72, "elapsed_secs": 4321.2, "elapsed_hours": 1.2, "calls_total": 863, "accepted": 837, "rejected_503": 0, "other": {"timeout": 16, "error": 10}, "in_flight": 2, "ts": "2026-05-19T07:37:43.926870+00:00"}
+{"cycle": 73, "elapsed_secs": 4381.2, "elapsed_hours": 1.217, "calls_total": 876, "accepted": 844, "rejected_503": 0, "other": {"timeout": 18, "error": 14}, "in_flight": 1, "ts": "2026-05-19T10:13:02.713196+00:00"}
+{"cycle": 74, "elapsed_secs": 4441.2, "elapsed_hours": 1.234, "calls_total": 888, "accepted": 849, "rejected_503": 0, "other": {"timeout": 22, "error": 17}, "in_flight": 0, "ts": "2026-05-19T12:43:55.041285+00:00"}
+{"cycle": 75, "elapsed_secs": 4501.2, "elapsed_hours": 1.25, "calls_total": 899, "accepted": 854, "rejected_503": 0, "other": {"timeout": 26, "error": 19}, "in_flight": 2, "ts": "2026-05-19T15:17:03.562887+00:00"}
+{"cycle": 76, "elapsed_secs": 4561.3, "elapsed_hours": 1.267, "calls_total": 911, "accepted": 861, "rejected_503": 0, "other": {"timeout": 29, "error": 21}, "in_flight": 2, "ts": "2026-05-19T17:51:46.503338+00:00"}
+{"cycle": 77, "elapsed_secs": 4621.3, "elapsed_hours": 1.284, "calls_total": 924, "accepted": 871, "rejected_503": 0, "other": {"timeout": 32, "error": 21}, "in_flight": 0, "ts": "2026-05-19T18:13:33.485484+00:00"}
+{"cycle": 78, "elapsed_secs": 4681.3, "elapsed_hours": 1.3, "calls_total": 936, "accepted": 883, "rejected_503": 0, "other": {"timeout": 32, "error": 21}, "in_flight": 0, "ts": "2026-05-19T18:14:33.497035+00:00"}
+{"cycle": 79, "elapsed_secs": 4741.3, "elapsed_hours": 1.317, "calls_total": 948, "accepted": 895, "rejected_503": 0, "other": {"timeout": 32, "error": 21}, "in_flight": 1, "ts": "2026-05-19T18:15:33.511183+00:00"}
+{"cycle": 80, "elapsed_secs": 4801.3, "elapsed_hours": 1.334, "calls_total": 960, "accepted": 907, "rejected_503": 0, "other": {"timeout": 32, "error": 21}, "in_flight": 0, "ts": "2026-05-19T18:16:33.513078+00:00"}
+{"cycle": 81, "elapsed_secs": 4861.3, "elapsed_hours": 1.35, "calls_total": 972, "accepted": 919, "rejected_503": 0, "other": {"timeout": 32, "error": 21}, "in_flight": 1, "ts": "2026-05-19T18:17:33.539375+00:00"}
+{"cycle": 82, "elapsed_secs": 4921.3, "elapsed_hours": 1.367, "calls_total": 984, "accepted": 931, "rejected_503": 0, "other": {"timeout": 32, "error": 21}, "in_flight": 1, "ts": "2026-05-19T18:18:33.569327+00:00"}
+{"cycle": 83, "elapsed_secs": 4981.4, "elapsed_hours": 1.384, "calls_total": 996, "accepted": 943, "rejected_503": 0, "other": {"timeout": 32, "error": 21}, "in_flight": 1, "ts": "2026-05-19T18:19:33.586039+00:00"}
+{"cycle": 84, "elapsed_secs": 5041.4, "elapsed_hours": 1.4, "calls_total": 1008, "accepted": 955, "rejected_503": 0, "other": {"timeout": 32, "error": 21}, "in_flight": 1, "ts": "2026-05-19T18:20:33.602677+00:00"}
+{"cycle": 85, "elapsed_secs": 5101.4, "elapsed_hours": 1.417, "calls_total": 1020, "accepted": 967, "rejected_503": 0, "other": {"timeout": 32, "error": 21}, "in_flight": 1, "ts": "2026-05-19T18:21:33.621149+00:00"}
+{"cycle": 86, "elapsed_secs": 5161.4, "elapsed_hours": 1.434, "calls_total": 1032, "accepted": 979, "rejected_503": 0, "other": {"timeout": 32, "error": 21}, "in_flight": 1, "ts": "2026-05-19T18:22:33.667023+00:00"}
+{"cycle": 87, "elapsed_secs": 5221.4, "elapsed_hours": 1.45, "calls_total": 1044, "accepted": 991, "rejected_503": 0, "other": {"timeout": 32, "error": 21}, "in_flight": 0, "ts": "2026-05-19T18:23:33.669106+00:00"}
+{"cycle": 88, "elapsed_secs": 5281.5, "elapsed_hours": 1.467, "calls_total": 1056, "accepted": 1003, "rejected_503": 0, "other": {"timeout": 32, "error": 21}, "in_flight": 0, "ts": "2026-05-19T18:24:33.671429+00:00"}
+{"cycle": 89, "elapsed_secs": 5341.5, "elapsed_hours": 1.484, "calls_total": 1068, "accepted": 1015, "rejected_503": 0, "other": {"timeout": 32, "error": 21}, "in_flight": 0, "ts": "2026-05-19T18:25:33.690470+00:00"}

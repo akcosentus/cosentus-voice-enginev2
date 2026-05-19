@@ -783,3 +783,79 @@ tracked separately for Phase 5 follow-up.
 Test guard: ``tests/bot/test_bot.py::test_run_bot_constructs_pipeline_runner_with_force_gc_true``.
 
 </details>
+
+## Entry 17: ~~Residual Pipecat / native memory leak after ``force_gc=True``~~
+
+**Closed:** 2026-05-19 (Wave 6 Phase B1). Infrastructure-side hourly
+task recycler caps the residual native leak at the task boundary.
+20 consecutive hourly recycles in staging, 0 dropped calls, 0 ALB
+5xx, memory stayed under 25 % at all times (well below the 60 %
+acceptance gate). Engine code untouched — the recycler runs entirely
+in infrastructure.
+
+---
+
+<details>
+<summary>Original entry (kept for history)</summary>
+
+**Context.** After Entry 16's ``force_gc=True`` fix (Wave 6
+Phase A) and Wave 6 Option I autoscaling/health-check tuning, a
+2-hour revalidation soak at 12 cpm still showed memory growing at
+**0.45 %/min** worst-case (≈ 9 MB/min on a 2 048 MB task,
+extrapolated to 100 % in ~3 hours). The Python-side cycle leak was
+fixed by Entry 16 but a residual native leak persisted.
+
+**Root cause.** Pipecat open issue #3750: daily-python and grpcio
+allocate native (C / Rust) memory that Python's GC cannot see and
+cannot reclaim. Each call leaves ~0.5–1 MB of native heap behind.
+Under sustained traffic, this accumulates linearly.
+
+**Why not engine-side self-recycle (Option B3).** Adding a
+self-terminate-after-N-calls path to the engine puts lifecycle
+concerns in the call-path layer. Hard to disable in an emergency,
+harder to observe. Infrastructure-side recycling is the right
+separation.
+
+**Fix.** ``infrastructure/src/constructs/task-recycler.ts`` —
+EventBridge ``rate(1 hour)`` → inline Python Lambda →
+``ecs:UpdateService(forceNewDeployment=true)`` on the engine
+service. With ``minHealthyPercent=100``, ECS launches the new task
+before tearing down the old one, so traffic continues uninterrupted.
+IAM scoped to the single service ARN.
+
+**Verification (Wave 6 Phase B1, staging, 20 h elapsed wall-clock
+including ~1 h of clean load + 18 h of unsupervised hourly
+recycles):**
+
+- 20 Lambda invocations across 20 distinct hours. 0 errors.
+- Per-recycle rollover: ~3 min. Both new tasks online before either
+  old task stopped. 0 ALB 5xx across the entire window.
+- Memory profile under load: peak 24.7 %, between-recycle growth
+  0.16 %/min — well within the 60 %/hour budget. Idle memory
+  stayed at 10–13 %.
+- See ``backend/voice-agent/scripts/wave6-runs/b1-soak-2h/REPORT.md``
+  for the full data.
+
+The 11 client-side timeouts at 16:19–16:21 PT in the soak heartbeat
+log were a laptop network blip (0 ALB 5xx, 0 engine errors,
+TargetResponseTime steady at 0.33 s during the window). Not
+caused by recycling.
+
+**Cost.** One ``UpdateService`` call per hour per environment.
+CFN footprint per env: 1 Lambda (128 MB / 30 s), 1 IAM role +
+scoped policy, 1 EventBridge rule + Lambda permission, 1 LogGroup.
+Negligible AWS spend (<\$1/month). Each recycle triggers a fresh
+task pull from ECR, but the image is cached at the Fargate host
+level so warmup is dominated by Python imports (~30 s) not by image
+pull.
+
+**Residual.** Upstream Pipecat #3750 engagement remains a Phase 5
+follow-up item. The recycler mitigates the symptom — the bug itself
+still exists and would re-emerge if the recycler is ever disabled.
+
+**Layer / file.** Layer 11 —
+``infrastructure/src/constructs/task-recycler.ts`` and ComputeStack
+wiring at ``infrastructure/src/stacks/compute-stack.ts``. CDK
+commit ``e80c65d``.
+
+</details>

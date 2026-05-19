@@ -75,7 +75,10 @@ export class TaskRecyclerConstruct extends Construct {
     const role = new iam.Role(this, 'ExecutionRole', {
       roleName: `${functionName}-role`,
       assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
-      description: 'Task recycler — forces rolling deployment on the engine ECS service.',
+      // IAM role description is ASCII-only (same restriction as EC2
+      // security group descriptions — em-dashes get rejected). Use
+      // hyphen-minus.
+      description: 'Task recycler - forces rolling deployment on the engine ECS service.',
       managedPolicies: [
         iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
       ],
