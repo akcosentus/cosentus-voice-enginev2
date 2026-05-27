@@ -919,3 +919,92 @@ SSM workaround documented in this entry; comment in
 ``infrastructure/.env.prod`` points back here for future
 operators.
 
+## Entry 19: v2-tools-test agent migrated to Haiku 4.5 (A/B test)
+
+**Status:** deployed 2026-05-27. Follow-up: evaluate quality.
+
+**Context.** Wave 6 follow-up (cost-conscious defaults strategy).
+The new-agent default landed at Haiku 4.5 in commit ``14b1d7c``
+(engine) + ``0a162c0`` / ``7308663`` (lambda). For agents that
+predate the default change, ``llm_model`` is still
+``claude-sonnet-4-6``. Migrating all three existing agents at once
+risks degrading the production-relevant Cosentus agent
+(``chris-claim-status``) without an empirical quality signal.
+
+**Decision.** A/B migrate ``v2-tools-test`` ONLY. It's the safest
+candidate:
+
+* Internal tool-call test fixture, not a customer-facing agent.
+* Already used Haiku 4.5 for post-call analysis (PCA) — flipping
+  the conversation LLM to Haiku too aligns the agent end-to-end.
+* Lowest blast radius — no real production traffic will land
+  here.
+
+``chris-claim-status`` (the only Cosentus-domain agent) and
+``v2-inbound-test`` stay on Sonnet 4.6 pending quality evaluation
+of Haiku on a real PSTN smoke test against v2-tools-test.
+
+**Migration.** Single ``PUT /api/agents/v2-tools-test`` against
+the prod Lambda alias::
+
+    aws lambda invoke \
+      --function-name medcloud-voice-api:live \
+      --cli-binary-format raw-in-base64-out \
+      --payload '{"httpMethod":"PUT","path":"/api/agents/v2-tools-test","body":"{\"llm_model\":\"claude-haiku-4-5-20251001\"}"}' \
+      /tmp/migrate.json
+
+Equivalent SQL (for anyone running it directly against Aurora)::
+
+    UPDATE voice_agents
+       SET llm_model = 'claude-haiku-4-5-20251001'
+     WHERE name = 'v2-tools-test';
+
+Verified end-to-end:
+
+* ``GET /api/agents/v2-tools-test`` returns
+  ``llm_model: claude-haiku-4-5-20251001``
+* ``GET /api/agents/v2-tools-test/runtime-config`` returns
+  ``llm.model: claude-haiku-4-5-20251001`` (the engine view).
+* The engine's ``factory.py::resolve_bedrock_model_id``
+  resolves the dated short form to
+  ``us.anthropic.claude-haiku-4-5-20251001-v1:0`` via the
+  date-suffix-stripping fallback.
+
+**Related fix shipped with this migration.** The Lambda's
+``VALID_LLM_MODELS`` allowlist was three stale entries
+(``claude-sonnet-4-6``, ``claude-haiku-4-5-20241022``,
+``claude-sonnet-4-5-20250514``). The current Haiku inference
+profile is dated ``20251001`` — not in the allowlist. The first
+migration attempt 400'd until the Lambda's allowlist was synced
+with the engine's resolver map. Lambda commit ``ec17916`` ships
+the updated allowlist (Sonnet 4 / 4.5 / 4.6, Haiku 4.5, Opus 4.5
+/ 4.6 / 4.7 with both bare and dated forms).
+
+**Exit criteria.** Decide whether to flip the other two agents:
+
+1. Run a real PSTN smoke against v2-tools-test (preferably 5-10
+   short calls covering tool-call paths: ``press_digit``,
+   ``end_call``, ``transfer_call``).
+2. Compare Haiku-driven transcripts qualitatively against the
+   historical Sonnet 4.6 transcripts for the same agent in
+   ``voice_calls`` (calls before 2026-05-27).
+3. If Haiku quality is acceptable on this bounded reasoning,
+   migrate ``chris-claim-status`` next (the Cosentus production
+   agent). ``v2-inbound-test`` is lowest-risk and can move with
+   ``chris`` or independently.
+
+**Cost impact (if all three eventually migrate to Haiku).** Per
+5-minute call (~75K input + 7.5K output tokens):
+
+* Sonnet 4.6: ~$0.34
+* Haiku 4.5:  ~$0.11 (3x cheaper)
+
+At expected initial production rates (single-digit to low-
+double-digit concurrent calls), the difference is modest in
+absolute dollars but materially changes unit economics at scale.
+
+**Layer / file.** Production data — single row in Aurora
+``voice_agents`` table. No code change required for the
+migration itself; allowlist fix in
+``cosentus-voice-api-lambda`` commit ``ec17916``.
+
