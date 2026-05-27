@@ -41,3 +41,14 @@ Thumbs.db
 
 wave6_results/
 
+# Layer 9.5 / 9.6 / Wave 6 scratch outputs from local harness runs.
+# The b1-soak-2h directory under scripts/wave6-runs/ IS tracked
+# (Wave 6 B1 verification report + jsonl heartbeat is source-of-
+# truth). Everything else under wave6-runs/ is per-run scratch
+# (different timestamp directory per run) and not worth tracking.
+scale_test_results/
+soak_24h.log
+soak_*.log
+backend/voice-agent/scripts/wave6-runs/*/
+!backend/voice-agent/scripts/wave6-runs/b1-soak-2h/
+

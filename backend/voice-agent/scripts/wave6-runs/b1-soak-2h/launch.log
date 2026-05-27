@@ -2,3 +2,14 @@
 2026-05-18 15:32:52 [info     ] scenario_running               scenario=e
 2026-05-18 15:32:52 [info     ] scenario_e_starting            duration_h=2.0 pre={'desired_count': 2, 'running_count': 2, 'pending_count': 0, 'deployments': 1, 'primary_deployment_status': 'COMPLETED', 'task_definition_arn': 'arn:aws:ecs:us-east-1:825269749545:task-definition/cosentus-voice-engine-staging:5', 'running_task_count': 2}
 2026-05-18 16:32:53 [info     ] scenario_e_progress            accepted=709 calls_total=720 cycle=60 elapsed_hours=1.0 elapsed_secs=3600.9 in_flight=0 other={'timeout': 11} rejected_503=0 ts=2026-05-18T23:32:53.852585+00:00
+2026-05-19 11:58:36 [info     ] scenario_e_complete            calls=1440 status=fail
+2026-05-19 11:58:36 [info     ] scenario_done                  scenario=e status=fail
+2026-05-19 11:58:36 [info     ] wave6_run_complete             failures=['e'] report=/Users/alexkashkarian/Desktop/cosentus-voice-enginev2/backend/voice-agent/scripts/wave6-runs/b1-soak-2h/report.md run_dir=/Users/alexkashkarian/Desktop/cosentus-voice-enginev2/backend/voice-agent/scripts/wave6-runs/b1-soak-2h
+
+========================================================================
+Wave 6 run complete.
+  Run directory : /Users/alexkashkarian/Desktop/cosentus-voice-enginev2/backend/voice-agent/scripts/wave6-runs/b1-soak-2h
+  Report        : /Users/alexkashkarian/Desktop/cosentus-voice-enginev2/backend/voice-agent/scripts/wave6-runs/b1-soak-2h/report.md
+  Scenarios     : e
+  Failures      : e
+========================================================================
