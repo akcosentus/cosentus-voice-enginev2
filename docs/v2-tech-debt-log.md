@@ -859,3 +859,63 @@ wiring at ``infrastructure/src/stacks/compute-stack.ts``. CDK
 commit ``e80c65d``.
 
 </details>
+
+## Entry 18: ECR repo is single-physical, two CDK stacks try to own it
+
+**Status:** open, workaround applied 2026-05-27.
+
+**Context.** ``EcrStack`` is parameterized per environment and
+synthesizes to ``cosentus-voice-engine-{env}-ecr``. Both the
+staging and prod stacks create an ECR repository named
+``cosentus-voice-engine`` (no env suffix in the repo name itself —
+deliberately, since container images are environment-agnostic and
+we only differentiate at the image-tag level). Staging deployed
+first and created the repo. Deploying the prod stack fails with::
+
+    Resource of type 'AWS::ECR::Repository' with identifier
+    'cosentus-voice-engine' already exists.
+
+Both ComputeStacks read the ECR repo ARN from a *per-env* SSM
+key (``/cosentus-voice-engine/{env}/ecr/repositoryArn``), so once
+the SSM key is populated for prod, the prod ComputeStack works
+fine — it doesn't care which CFN stack created the repo, only
+that the SSM key resolves.
+
+**Workaround (2026-05-27, prod deploy).** Skip the prod EcrStack
+entirely. Populate the prod SSM keys manually via the AWS CLI to
+point at the shared repo::
+
+    aws ssm put-parameter \
+      --name /cosentus-voice-engine/prod/ecr/repositoryArn \
+      --value arn:aws:ecr:us-east-1:825269749545:repository/cosentus-voice-engine \
+      --type String
+
+    aws ssm put-parameter \
+      --name /cosentus-voice-engine/prod/ecr/repositoryUri \
+      --value 825269749545.dkr.ecr.us-east-1.amazonaws.com/cosentus-voice-engine \
+      --type String
+
+This means the prod EcrStack template exists (synthesizes cleanly)
+but is never deployed. ``cdk list -c environment=prod`` still
+shows it; ``cdk deploy --all -c environment=prod`` would fail on
+it. Anyone doing a prod redeploy must deploy stacks individually
+and skip the EcrStack.
+
+**Proper fix (deferred).** Make ``EcrStack`` detect whether the
+repo already exists and call ``Repository.fromRepositoryName``
+in that case (importing rather than creating). Then both env's
+EcrStacks deploy cleanly; the first creates, subsequent ones
+import. ~1 hour of CDK work + tests. Not blocking prod launch.
+
+Alternative: rename the prod repo to ``cosentus-voice-engine-prod``
+and let both stacks own separate physical repos. Costs nothing
+extra (ECR is per-repo per-image storage) but means images must
+be built + pushed twice. Recommend NOT going this way — current
+single-repo design is correct, just needs the CDK code to handle
+the existing-resource case.
+
+**Layer / file.** Layer 11 — ``infrastructure/src/stacks/ecr-stack.ts``.
+SSM workaround documented in this entry; comment in
+``infrastructure/.env.prod`` points back here for future
+operators.
+
