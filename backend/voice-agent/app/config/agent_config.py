@@ -80,7 +80,13 @@ class LLMConfig(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    model: str = "claude-sonnet-4-6"
+    # Default Claude Haiku 4.5 for voice workloads (short turns, bounded
+    # reasoning, tool-call-driven flows). Sonnet 4.6 is ~3x more
+    # expensive per token; we opt into Sonnet explicitly for hard cases.
+    # This default is mostly defensive — the lambda's
+    # GetRuntimeConfig payload always includes llm.model, so this
+    # fallback only fires if the lambda is misconfigured.
+    model: str = "claude-haiku-4-5"
     max_tokens: int = 200
     temperature: float = 0.7
 

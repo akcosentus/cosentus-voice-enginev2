@@ -105,9 +105,13 @@ Pipecat template. Numbers map 1:1 to the project brief.
    round-trip from the editor through Aurora into the pipeline.
 
 7. **AWS Bedrock for LLM, with per-agent model selection from Aurora**
-   — Cosentus standardises on Claude (currently the Sonnet-4-6 /
-   Haiku-4-5 family). Per-agent model lets us route cheap calls to
-   Haiku and reserve Sonnet for harder tasks without code changes.
+   — Cosentus standardises on Claude. **Haiku 4.5 is the default for
+   new agents** (voice workloads have short turns, bounded reasoning,
+   and tool-call-driven flows — exactly Haiku's strength, and ~3x
+   cheaper than Sonnet per token). Per-agent model selection lets us
+   opt into Sonnet 4.6 explicitly for the small set of agents that
+   need harder reasoning, without code changes. Defaults landed
+   2026-05-27 ahead of disposable-agent-creation product flow.
 
 8. **Daily.co cloud recording into S3 with SSE-KMS** — recording is
    first-class. Every call writes a recording artifact; access is

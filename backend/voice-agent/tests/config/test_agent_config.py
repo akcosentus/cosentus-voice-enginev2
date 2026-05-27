@@ -235,6 +235,34 @@ class TestAgentConfigSpeakFirst:
         assert cfg.name == "chris-claim-status"
 
 
+class TestLLMConfigDefaults:
+    """Regression guard for the engine-side default LLM model.
+
+    The ``LLMConfig.model`` Pydantic default fires only when the lambda
+    payload omits the ``llm.model`` field entirely (defensive — in
+    practice the lambda always populates it). We pin the default to
+    Haiku 4.5 to match the cost-conscious defaults strategy across the
+    platform; changing this should be intentional, so the test exists
+    to make any default-flip visible.
+    """
+
+    def test_llm_model_default_is_haiku_4_5(self):
+        from app.config.agent_config import LLMConfig
+
+        cfg = LLMConfig()
+        assert cfg.model == "claude-haiku-4-5"
+
+    def test_agent_config_without_llm_section_defaults_to_haiku(self):
+        cfg = AgentConfig.model_validate(
+            {
+                # Minimum payload — name is required, everything else
+                # falls through to defaults.
+                "name": "test-defaults",
+            }
+        )
+        assert cfg.llm.model == "claude-haiku-4-5"
+
+
 class TestAgentConfigValidation:
     def test_empty_config_fails_validation_name_required(self):
         with pytest.raises(ValidationError) as exc:
