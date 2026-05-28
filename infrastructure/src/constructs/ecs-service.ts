@@ -144,6 +144,7 @@ export class EcsServiceConstruct extends Construct {
       secretArns,
       recordingsBucketArn,
       recordingsKmsKeyArn,
+      voiceApiLambdaName,
     );
 
     this.taskDefinition = new ecs.FargateTaskDefinition(this, 'TaskDefinition', {
@@ -290,6 +291,7 @@ export class EcsServiceConstruct extends Construct {
     secretArns: EcsServiceSecretArns,
     recordingsBucketArn: string,
     recordingsKmsKeyArn: string,
+    voiceApiLambdaName: string,
   ): iam.Role {
     const role = new iam.Role(this, 'TaskRole', {
       roleName: `${prefix}-task-role`,
@@ -336,6 +338,23 @@ export class EcsServiceConstruct extends Construct {
       );
     }
 
+    // Grant invoke on the configured voice-api Lambda. The
+    // `voiceApiLambdaName` config value may include an `:alias`
+    // suffix (e.g. `medcloud-voice-api:live`); strip it before
+    // building the resource ARN so the grant matches both the
+    // unqualified function and any of its aliases / versions.
+    //
+    // Trailing wildcard matches alias-qualified ARNs (Lambda
+    // service formats those as `function:<name>:<alias>`), so
+    // `function:medcloud-voice-api*` covers `:live`, `:$LATEST`,
+    // and any future aliases. For the staging stub (whose name is
+    // `cosentus-voice-api-staging-stub`) the same pattern works.
+    //
+    // Hardcoded `cosentus-voice-api-*` previously didn't match
+    // prod's `medcloud-voice-api:live`, which 100%-broke calls in
+    // prod with AccessDeniedException on agent-config load.
+    // Caught 2026-05-28 during the prod PSTN smoke.
+    const voiceApiFunctionName = voiceApiLambdaName.split(':')[0];
     role.addToPolicy(
       new iam.PolicyStatement({
         sid: 'VoiceApiLambdaInvoke',
@@ -344,7 +363,7 @@ export class EcsServiceConstruct extends Construct {
           stack.formatArn({
             service: 'lambda',
             resource: 'function',
-            resourceName: 'cosentus-voice-api-*',
+            resourceName: `${voiceApiFunctionName}*`,
             arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
           }),
         ],
