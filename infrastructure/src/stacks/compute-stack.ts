@@ -11,6 +11,7 @@ import {
   EcsServiceConstruct,
   MonitoringConstruct,
   TaskRecyclerConstruct,
+  ElevenLabsHealthCheckConstruct,
 } from '../constructs';
 
 export interface ComputeStackProps extends cdk.StackProps {
@@ -55,6 +56,7 @@ export class ComputeStack extends cdk.Stack {
   public readonly ecsService: EcsServiceConstruct;
   public readonly monitoring: MonitoringConstruct;
   public readonly taskRecycler: TaskRecyclerConstruct;
+  public readonly elevenLabsHealthCheck: ElevenLabsHealthCheckConstruct;
 
   constructor(scope: Construct, id: string, props: ComputeStackProps) {
     super(scope, id, props);
@@ -200,6 +202,18 @@ export class ComputeStack extends cdk.Stack {
       serviceName: this.ecsService.service.serviceName,
       // Default schedule (1 h) is correct; explicit here for
       // readability.
+      schedule: undefined,
+    });
+
+    // ElevenLabs subscription health check (2026-06-01). Polls the EL
+    // subscription endpoint every 15 min and alarms on the shared SNS
+    // topic if the subscription is inactive (past-due payment) or quota
+    // is nearly exhausted — both silently block TTS and produced a
+    // silent-call outage on 2026-05-28.
+    this.elevenLabsHealthCheck = new ElevenLabsHealthCheckConstruct(this, 'ElevenLabsHealthCheck', {
+      config,
+      elevenLabsSecretArn,
+      alarmTopic: this.monitoring.alarmTopic,
       schedule: undefined,
     });
 

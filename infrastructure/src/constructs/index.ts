@@ -9,3 +9,7 @@ export {
 } from './ecs-service';
 export { MonitoringConstruct, MonitoringConstructProps } from './monitoring';
 export { TaskRecyclerConstruct, TaskRecyclerConstructProps } from './task-recycler';
+export {
+  ElevenLabsHealthCheckConstruct,
+  ElevenLabsHealthCheckConstructProps,
+} from './elevenlabs-health-check';
